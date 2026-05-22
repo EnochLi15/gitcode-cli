@@ -1,5 +1,5 @@
 {
-  "name": "@enoch0825/gitcode-cli",
+  "name": "@plm-cac/gitcode-cli",
   "version": "0.1.0",
   "description": "TypeScript CLI-Anything inspired web-to-CLI analyzer and scaffold generator",
   "type": "module",
