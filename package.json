@@ -10,7 +10,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "test": "npm run build && node --test test/*.test.mjs test/*.e2e.mjs",
+    "test:unit": "npm run build && node --test test/*.test.mjs",
+    "test:e2e": "npm run build && node --test test/*.e2e.mjs",
+    "test:e2e:mock": "npm run build && node --test test/gh-contract.e2e.mjs test/workflow-git.e2e.mjs",
+    "test:e2e:live": "GITCODE_LIVE=1 npm run test:e2e",
+    "test:e2e:live-repo": "GITCODE_LIVE_REPO_CREATE=1 npm run test:e2e"
   },
   "files": [
     "dist",

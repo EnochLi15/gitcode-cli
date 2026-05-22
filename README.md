@@ -186,6 +186,12 @@ not mutate live GitCode data:
 npm test
 ```
 
+Mock-only E2E contracts can be run directly:
+
+```bash
+npm run test:e2e:mock
+```
+
 Read-only live smoke tests are opt-in and target
 `https://gitcode.com/gcw_CSGJYRfL/test`:
 
@@ -198,3 +204,13 @@ Authenticated write probes are separate and cleanup-oriented:
 ```bash
 GITCODE_LIVE_WRITES=1 GITCODE_TOKEN=... npm test
 ```
+
+Live repository creation is a separate opt-in E2E because it creates and then
+deletes a real temporary private repository:
+
+```bash
+GITCODE_LIVE_REPO_CREATE=1 GITCODE_TOKEN=... npm run test:e2e:live-repo
+```
+
+See [E2E testing framework](docs/e2e-testing.md) for the contract case format,
+mock server helpers, mock git harness, and live repo cleanup behavior.
