@@ -1,0 +1,26 @@
+{
+  "name": "cli-anything-web2cli",
+  "version": "0.1.0",
+  "description": "TypeScript CLI-Anything inspired web-to-CLI analyzer and scaffold generator",
+  "type": "module",
+  "bin": {
+    "cli-anything-web2cli": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "agent-harness/WEB2CLI.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}
+
