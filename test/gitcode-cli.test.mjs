@@ -122,6 +122,24 @@ test("auth validates interactive and stdin tokens, and env tokens take precedenc
   });
 });
 
+test("custom hostnames use host-specific stored tokens for API requests", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/user" && req.headers.authorization === "Bearer alt-token") return { body: { login: "alt-user" } };
+    if (req.path === "/api/v5/user") return { status: 401, body: { message: "wrong token" } };
+    return { status: 404, body: {} };
+  }, async ({ base }) => {
+    const env = tempEnv({ GITCODE_API_BASE: base });
+    const login = await run(["--hostname", "alt.gitcode.test", "auth", "login", "--with-token"], { env, input: "alt-token\n" });
+    assert.equal(login.code, 0);
+
+    const status = await run(["--hostname", "alt.gitcode.test", "auth", "status", "--json"], { env });
+    assert.deepEqual(JSON.parse(status.stdout), { hostname: "alt.gitcode.test", tokenSource: "store" });
+
+    const api = await run(["--hostname", "alt.gitcode.test", "api", "user"], { env });
+    assert.equal(JSON.parse(api.stdout).login, "alt-user");
+  });
+});
+
 test("human errors can be localized while JSON errors stay stable", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-locale-"));
   const zh = await run(["repo", "view"], { env: tempEnv({ GC_REPO: "", GITCODE_LANG: "zh-CN" }), cwd });
@@ -278,7 +296,7 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
     const review = await run(["pr", "review", "3", "-R", "gcw_CSGJYRfL/test", "--body", "looks fine"], { env, cwd });
     assert.match(review.stdout, /Reviewed pull request #3/);
 
-    const merge = await run(["pr", "merge", "3", "-R", "gcw_CSGJYRfL/test", "--squash", "--delete-branch"], { env, cwd });
+    const merge = await run(["pr", "merge", "3", "-R", "gcw_CSGJYRfL/test", "--squash", "--delete-branch", "--yes"], { env, cwd });
     assert.match(merge.stdout, /Merged pull request #3/);
 
     const checkout = await run(["pr", "checkout", "3", "-R", "gcw_CSGJYRfL/test"], { env, cwd });
@@ -329,7 +347,10 @@ test("org and ssh-key commands cover happy paths and permission failures", async
     assert.equal(JSON.parse((await run(["ssh-key", "list", "--json", "id,title"], { env })).stdout)[0].title, "laptop");
     const added = await run(["ssh-key", "add", "--title", "desktop", "--key", "ssh-ed25519 AAA"], { env });
     assert.match(added.stdout, /Added SSH key desktop/);
-    const deleted = await run(["ssh-key", "delete", "2"], { env });
+    const refusedDelete = await run(["ssh-key", "delete", "2"], { env });
+    assert.equal(refusedDelete.code, 1);
+    assert.match(refusedDelete.stderr, /--yes/);
+    const deleted = await run(["ssh-key", "delete", "2", "--yes"], { env });
     assert.match(deleted.stdout, /Deleted SSH key 2/);
   });
 });
@@ -369,6 +390,7 @@ if [ "$1" = "status" ]; then echo " M README.md"; fi
 test("label, release, search, and browse commands are wired", async () => {
   await withServer((req) => {
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/labels") return { body: [{ name: "bug", color: "ff0000" }] };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/labels/bug" && req.method === "DELETE") return { body: {} };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases" && req.method === "POST") return { body: { tag_name: req.body.tag_name, name: req.body.name, body: req.body.body } };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases") return { body: [{ tag_name: "v1.0.0", name: "one" }] };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases/v1.0.0") return { body: { tag_name: "v1.0.0", body: "notes" } };
@@ -380,13 +402,20 @@ test("label, release, search, and browse commands are wired", async () => {
   }, async ({ base }) => {
     const env = tempEnv({ GITCODE_API_BASE: base, GC_REPO: "gcw_CSGJYRfL/test", GITCODE_TOKEN: "secret" });
     assert.equal(JSON.parse((await run(["label", "list", "--json", "name"], { env })).stdout)[0].name, "bug");
+    const refusedLabelDelete = await run(["label", "delete", "bug"], { env });
+    assert.equal(refusedLabelDelete.code, 1);
+    assert.match(refusedLabelDelete.stderr, /--yes/);
+    assert.match((await run(["label", "delete", "bug", "--yes"], { env })).stdout, /Deleted label bug/);
     assert.equal(JSON.parse((await run(["release", "list", "--json", "tagName"], { env })).stdout)[0].tagName, "v1.0.0");
     assert.match((await run(["release", "view", "v1.0.0"], { env })).stdout, /notes/);
     assert.equal(JSON.parse((await run(["release", "create", "v2.0.0", "--title", "two", "--notes", "notes", "--json", "tagName"], { env })).stdout).tagName, "v2.0.0");
     const guardedDelete = await run(["release", "delete", "v2.0.0", "-R", "gcw_CSGJYRfL/test"], { env });
     assert.equal(guardedDelete.code, 1);
     assert.match(guardedDelete.stderr, /--cleanup-tag/);
-    assert.match((await run(["release", "delete", "v2.0.0", "--cleanup-tag"], { env })).stdout, /Deleted release/);
+    const refusedCleanup = await run(["release", "delete", "v2.0.0", "--cleanup-tag"], { env });
+    assert.equal(refusedCleanup.code, 1);
+    assert.match(refusedCleanup.stderr, /--yes/);
+    assert.match((await run(["release", "delete", "v2.0.0", "--cleanup-tag", "--yes"], { env })).stdout, /Deleted release/);
     assert.equal(JSON.parse((await run(["search", "repos", "hello", "--json"], { env })).stdout)[0].fullName, "gcw_CSGJYRfL/test");
     assert.equal(JSON.parse((await run(["search", "issues", "seeded", "--state", "open", "--json", "title"], { env })).stdout)[0].title, "seeded issue");
     assert.equal((await run(["browse", "issues/7"], { env })).stdout.trim(), "https://gitcode.com/gcw_CSGJYRfL/test/issues/7");
@@ -485,6 +514,6 @@ test("authenticated GitCode sandbox writes are opt-in and cleanup-oriented", { s
   }
   const edit = await run(["label", "edit", marker, "-R", "gcw_CSGJYRfL/test", "--new-name", `${marker}-edited`, "--color", "669933"], { env });
   assert.equal(edit.code, 0);
-  const remove = await run(["label", "delete", `${marker}-edited`, "-R", "gcw_CSGJYRfL/test"], { env });
+  const remove = await run(["label", "delete", `${marker}-edited`, "-R", "gcw_CSGJYRfL/test", "--yes"], { env });
   assert.equal(remove.code, 0);
 });

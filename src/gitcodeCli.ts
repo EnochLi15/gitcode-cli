@@ -4,21 +4,12 @@ import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { stdin as input, stderr as errorOutput } from "node:process";
 import { completionCommand } from "./commands/completion.js";
+import { expandAlias, GitCodeContext, needOptionValue, parseGlobalArgs, takeFlag, takeMany, takeOption, takesValue } from "./gitcode/args.js";
 
 const defaultHost = "gitcode.com";
 const defaultApiBase = "https://api.gitcode.com/api/v5";
 const commandNames = new Set(["auth", "api", "repo", "issue", "pr", "file", "org", "ssh-key", "workflow", "label", "release", "search", "browse", "config", "alias", "completion"]);
 const nonJsonValues = new Set([...commandNames, "list", "view", "create", "edit", "delete", "close", "reopen", "comment", "merge", "checkout", "diff", "status", "clone", "set-default", "login", "logout", "token", "setup-git", "get", "set", "repos", "members", "add", "init", "push"]);
-
-interface GitCodeContext {
-  repo?: string;
-  hostname: string;
-  json: boolean;
-  jsonFields?: string[];
-  jq?: string;
-  template?: string;
-  web: boolean;
-}
 
 interface RepoRef {
   host: string;
@@ -40,8 +31,11 @@ class CliError extends Error {
   }
 }
 
+let activeHostname = defaultHost;
+
 export async function runGitCodeCli(argv: string[]): Promise<void> {
-  const { ctx, args } = parseGlobalArgs(argv);
+  const { ctx, args } = parseGlobalArgs(argv, defaultHost, nonJsonValues);
+  activeHostname = ctx.hostname;
   if (!ctx.json && ctx.jq) throw new CliError("--jq requires --json");
 
   let command = args.shift();
@@ -92,86 +86,6 @@ export function isGitCodeCommand(argv: string[]): boolean {
     }
   }
   return commandNames.has(args[0] ?? "");
-}
-
-function parseGlobalArgs(argv: string[]): { ctx: GitCodeContext; args: string[] } {
-  const args = [...argv];
-  const ctx: GitCodeContext = {
-    hostname: defaultHost,
-    json: false,
-    web: false
-  };
-  for (let i = 0; i < args.length;) {
-    const arg = args[i];
-    if (arg === "-R" || arg === "--repo") {
-      ctx.repo = needOptionValue(args, i, arg);
-      args.splice(i, 2);
-      continue;
-    }
-    if (arg.startsWith("-R=") || arg.startsWith("--repo=")) {
-      ctx.repo = arg.slice(arg.indexOf("=") + 1);
-      args.splice(i, 1);
-      continue;
-    }
-    if (arg === "--hostname") {
-      ctx.hostname = needOptionValue(args, i, arg);
-      args.splice(i, 2);
-      continue;
-    }
-    if (arg.startsWith("--hostname=")) {
-      ctx.hostname = arg.slice("--hostname=".length);
-      args.splice(i, 1);
-      continue;
-    }
-    if (arg === "--json" || arg.startsWith("--json=")) {
-      ctx.json = true;
-      const inlineFields = arg.startsWith("--json=") ? arg.slice("--json=".length) : undefined;
-      if (inlineFields !== undefined) {
-        ctx.jsonFields = inlineFields.split(",").map((field) => field.trim()).filter(Boolean);
-        args.splice(i, 1);
-      } else {
-        const next = args[i + 1];
-        if (next && !next.startsWith("-") && !nonJsonValues.has(next)) {
-          ctx.jsonFields = next.split(",").map((field) => field.trim()).filter(Boolean);
-          args.splice(i, 2);
-        } else {
-          args.splice(i, 1);
-        }
-      }
-      continue;
-    }
-    if (arg === "--jq" || arg === "-q") {
-      ctx.jq = needOptionValue(args, i, arg);
-      args.splice(i, 2);
-      continue;
-    }
-    if (arg.startsWith("--jq=")) {
-      ctx.jq = arg.slice("--jq=".length);
-      args.splice(i, 1);
-      continue;
-    }
-    if (arg === "--template") {
-      ctx.template = needOptionValue(args, i, arg);
-      args.splice(i, 2);
-      continue;
-    }
-    if (arg.startsWith("--template=")) {
-      ctx.template = arg.slice("--template=".length);
-      args.splice(i, 1);
-      continue;
-    }
-    if (arg === "--web" || arg === "-w") {
-      ctx.web = true;
-      args.splice(i, 1);
-      continue;
-    }
-    i += 1;
-  }
-  return { ctx, args };
-}
-
-function takesValue(flag: string | undefined): boolean {
-  return flag === "-R" || flag === "--repo" || flag === "--hostname" || flag === "--json" || flag === "--jq" || flag === "-q" || flag === "--template";
 }
 
 async function authCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
@@ -417,6 +331,7 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
     const number = objectNumber(needArg(args.shift(), "Usage: gc pr merge NUMBER [--merge|--squash|--rebase] [--delete-branch]"));
     const method = takeFlag(args, "--squash") ? "squash" : takeFlag(args, "--rebase") ? "rebase" : "merge";
     const deleteBranch = takeFlag(args, "--delete-branch");
+    await confirmDestructive(args, `merge pull request #${number}${deleteBranch ? " and delete its source branch" : ""}`);
     const beforeMerge = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls/${number}`, {}), repo);
     const merged = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls/${number}/merge`, { method: "PUT", body: { merge_method: method }, requireAuth: true }), repo);
     const pr = { ...beforeMerge, ...merged, number: merged.number ?? beforeMerge.number ?? number, state: merged.state || "merged", headRefName: merged.headRefName || beforeMerge.headRefName, baseRefName: merged.baseRefName || beforeMerge.baseRefName };
@@ -528,6 +443,7 @@ async function sshKeyCommand(ctx: GitCodeContext, args: string[]): Promise<void>
   }
   if (sub === "delete") {
     const id = needArg(args.shift(), "Usage: gc ssh-key delete KEY_ID");
+    await confirmDestructive(args, `delete SSH key ${id}`);
     await apiRequest(`user/keys/${encodeURIComponent(id)}`, { method: "DELETE", requireAuth: true });
     return emit(ctx, { id }, `Deleted SSH key ${id}`);
   }
@@ -608,6 +524,7 @@ async function labelCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
   }
   if (sub === "delete") {
     const name = needArg(args.shift(), "Usage: gc label delete NAME");
+    await confirmDestructive(args, `delete label ${name}`);
     await apiRequest(`${repoApiPath(repo)}/labels/${encodeURIComponent(name)}`, { method: "DELETE", requireAuth: true });
     return emit(ctx, { name }, `Deleted label ${name}`);
   }
@@ -650,6 +567,7 @@ async function releaseCommand(ctx: GitCodeContext, args: string[]): Promise<void
   if (sub === "delete") {
     const tag = needArg(args.shift(), "Usage: gc release delete TAG");
     const cleanupTag = takeFlag(args, "--cleanup-tag");
+    if (cleanupTag) await confirmDestructive(args, `delete release ${tag} and backing Git tag`);
     await deleteRelease(repo, tag, cleanupTag);
     return emit(ctx, { tagName: tag }, `Deleted release ${tag}`);
   }
@@ -749,9 +667,10 @@ async function runExtension(command: string, args: string[]): Promise<boolean> {
 }
 
 async function apiRequest(path: string, options: RequestOptions): Promise<unknown> {
-  const auth = await getAuth(defaultHost);
+  const hostname = activeHostname;
+  const auth = await getAuth(hostname);
   if (options.requireAuth && !auth.token) throw new CliError("Authentication required. Run `gc auth login --with-token` or set GITCODE_TOKEN.");
-  const base = process.env.GITCODE_API_BASE ?? defaultApiBase;
+  const base = apiBaseForHost(hostname);
   const url = new URL(path.replace(/^\/+/, ""), base.endsWith("/") ? base : `${base}/`);
   for (const [key, value] of Object.entries(options.query ?? {})) {
     if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
@@ -766,6 +685,11 @@ async function apiRequest(path: string, options: RequestOptions): Promise<unknow
   const init = { method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) };
   if (options.paginate) return paginate(url, init, auth.token);
   return requestOne(url, init, auth.token, options.body);
+}
+
+function apiBaseForHost(hostname: string): string {
+  if (process.env.GITCODE_API_BASE) return process.env.GITCODE_API_BASE;
+  return hostname === defaultHost ? defaultApiBase : `https://${hostname.replace(/^https?:\/\//, "").replace(/\/+$/, "")}/api/v5`;
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -1214,22 +1138,6 @@ function objectNumber(value: string): string {
   return match ? match[1] : value;
 }
 
-function shellWords(input: string): string[] {
-  const words = input.match(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|\S+/g) ?? [];
-  return words.map((word) => word.replace(/^['"]|['"]$/g, "").replace(/\\"/g, "\"").replace(/\\'/g, "'"));
-}
-
-function expandAlias(expansion: string, args: string[]): string[] {
-  const words = shellWords(expansion);
-  let highestPlaceholder = 0;
-  const expanded = words.map((word) => word.replace(/\$(\d+)/g, (_match, indexText: string) => {
-    const index = Number(indexText);
-    highestPlaceholder = Math.max(highestPlaceholder, index);
-    return args[index - 1] ?? "";
-  })).filter((word) => word !== "");
-  return highestPlaceholder > 0 ? [...expanded, ...args.slice(highestPlaceholder)] : [...expanded, ...args];
-}
-
 function ctxArgs(ctx: GitCodeContext): string[] {
   return [
     ...(ctx.repo ? ["-R", ctx.repo] : []),
@@ -1252,8 +1160,16 @@ async function promptToken(host: string): Promise<string> {
   return (await readStdin()).trim();
 }
 
+async function confirmDestructive(args: string[], action: string): Promise<void> {
+  if (takeFlag(args, "--yes", "-y") || process.env.GITCODE_ASSUME_YES === "1") return;
+  if (!input.isTTY) throw new CliError(`Refusing to ${action} without --yes. Re-run with --yes once the target is intentional.`);
+  errorOutput.write(`This will ${action}. Continue? [y/N] `);
+  const answer = (await readStdin()).trim().toLowerCase();
+  if (answer !== "y" && answer !== "yes") throw new CliError("Cancelled");
+}
+
 async function validateToken(host: string, token: string): Promise<void> {
-  const base = process.env.GITCODE_API_BASE ?? defaultApiBase;
+  const base = apiBaseForHost(host);
   const url = new URL("user", base.endsWith("/") ? base : `${base}/`);
   const headers = authHeaders(token);
   headers.accept = "application/json";
@@ -1355,53 +1271,6 @@ async function pushCurrentBranch(remote: string, upstream: boolean, force: boole
   const branch = await currentBranch();
   if (!branch) throw new CliError("Could not determine the current branch");
   await runProcess(gitBin(), ["push", ...(upstream ? ["--set-upstream"] : []), ...(force ? ["--force-with-lease"] : []), remote, branch]);
-}
-
-function takeOption(args: string[], ...names: string[]): string | undefined {
-  for (const name of names) {
-    const index = args.indexOf(name);
-    if (index >= 0) {
-      const value = args[index + 1];
-      if (!value || value.startsWith("-") && value !== "-") throw new CliError(`Missing value for ${name}`);
-      args.splice(index, 2);
-      return value;
-    }
-    const prefix = `${name}=`;
-    const inlineIndex = args.findIndex((arg) => arg.startsWith(prefix));
-    if (inlineIndex >= 0) {
-      const value = args[inlineIndex].slice(prefix.length);
-      if (!value) throw new CliError(`Missing value for ${name}`);
-      args.splice(inlineIndex, 1);
-      return value;
-    }
-  }
-  return undefined;
-}
-
-function takeMany(args: string[], ...names: string[]): string[] {
-  const values: string[] = [];
-  for (;;) {
-    const value = takeOption(args, ...names);
-    if (!value) return values;
-    values.push(value);
-  }
-}
-
-function takeFlag(args: string[], ...names: string[]): boolean {
-  for (const name of names) {
-    const index = args.indexOf(name);
-    if (index >= 0) {
-      args.splice(index, 1);
-      return true;
-    }
-  }
-  return false;
-}
-
-function needOptionValue(args: string[], index: number, name: string): string {
-  const value = args[index + 1];
-  if (!value || value.startsWith("-") && value !== "-") throw new CliError(`Missing value for ${name}`);
-  return value;
 }
 
 function needArg(value: string | undefined, usage: string): string {
@@ -1545,13 +1414,13 @@ function help(command?: string, subcommand?: string): void {
     api: "Usage: gc api <path> [-X METHOD] [-f key=value] [-F key=@file] [--input file.json] [--paginate]\n\nExamples:\n  gc api repos/gcw_CSGJYRfL/test/issues\n  gc api -X POST repos/OWNER/REPO/issues -f title=hello",
     repo: "Usage: gc repo <list|view|clone|set-default|create|fork|sync>\n\nExamples:\n  gc repo view -R gcw_CSGJYRfL/test --json name,defaultBranchRef\n  gc repo clone gcw_CSGJYRfL/test -- --depth 1",
     issue: "Usage: gc issue <list|view|create|edit|close|reopen|comment>\n\nExamples:\n  gc issue list -R OWNER/REPO --state open --json number,title --jq '.[0].title'\n  gc issue create --title 'Bug' --body-file issue.md",
-    pr: "Usage: gc pr <list|view|create|checkout|diff|status|comment|review|merge|close|reopen>\n\nExamples:\n  gc pr list --state open --base main\n  gc pr merge 12 --squash --delete-branch",
+    pr: "Usage: gc pr <list|view|create|checkout|diff|status|comment|review|merge|close|reopen>\n\nExamples:\n  gc pr list --state open --base main\n  gc pr merge 12 --squash --delete-branch --yes",
     file: "Usage: gc file <list|view>\n\nExamples:\n  gc file list -R OWNER/REPO src --json path,type\n  gc file view -R OWNER/REPO README.md --ref main",
     org: "Usage: gc org <list|view|repos|members>\n\nExamples:\n  gc org list --json login,name\n  gc org repos my-org --json fullName",
-    "ssh-key": "Usage: gc ssh-key <list|add|delete>\n\nExamples:\n  gc ssh-key list --json id,title\n  gc ssh-key add --title laptop --key-file ~/.ssh/id_ed25519.pub",
+    "ssh-key": "Usage: gc ssh-key <list|add|delete>\n\nExamples:\n  gc ssh-key list --json id,title\n  gc ssh-key add --title laptop --key-file ~/.ssh/id_ed25519.pub\n  gc ssh-key delete 2 --yes",
     workflow: "Usage: gc workflow <init|push|diff>\n\nExamples:\n  gc workflow init -R OWNER/REPO --commit-message 'Initial commit'\n  gc workflow push --set-upstream\n  gc workflow diff --staged --name-only",
     label: "Usage: gc label <list|create|edit|delete>",
-    release: "Usage: gc release <list|view|create|delete>\n\nExamples:\n  gc release list -R OWNER/REPO --json tagName,name\n  gc release delete v1.0.0 --cleanup-tag",
+    release: "Usage: gc release <list|view|create|delete>\n\nExamples:\n  gc release list -R OWNER/REPO --json tagName,name\n  gc release delete v1.0.0 --cleanup-tag --yes",
     search: "Usage: gc search <repos|issues|prs> QUERY [--state STATE] [--owner OWNER] [-R OWNER/REPO]",
     browse: "Usage: gc browse [issues|issues/N|pulls/N|releases/TAG|tree/BRANCH|blob/BRANCH/PATH]\n\nExamples:\n  gc browse -R OWNER/REPO issues\n  gc browse pulls/12",
     config: "Usage: gc config <get|set|list>\n\nExamples:\n  gc config set pager false\n  gc config get pager --json",
@@ -1596,6 +1465,8 @@ Global options:
   --web
   --help
   --version
+
+Destructive operations such as pr merge, ssh-key delete, label delete, and release delete --cleanup-tag require --yes in non-interactive sessions.
 
 Unsupported GitHub-only commands fail with a clear error. External extensions named gc-<command> on PATH are executed for custom workflows.
 `);
