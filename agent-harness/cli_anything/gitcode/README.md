@@ -10,6 +10,7 @@ This harness treats a GitCode repository page as the GUI surface and exposes rep
 - Bind the project to a local clone.
 - Clone with real `git clone`.
 - Inspect status, branches, tags, remotes, commits, and tracked files with real `git`.
+- Login with a GitCode Personal Access Token, with OAuth authorization-code login available as an advanced fallback.
 - List, fetch, create, and comment on GitCode issues.
 - List, fetch, create, and comment on GitCode pull requests.
 - List and submit pull request review comments.
@@ -43,7 +44,33 @@ cli-anything-gitcode --help
 
 ## API authentication
 
-Read-only GitCode API commands may work for public repositories without a token. Write commands require a token:
+Read-only GitCode API commands may work for public repositories without a token. Write commands require a token.
+
+Token resolution order:
+
+1. root `--token`
+2. `GITCODE_TOKEN`
+3. `GITCODE_ACCESS_TOKEN`
+4. saved Personal Access Token or OAuth token from `cli-anything-gitcode auth login`
+
+### Personal Access Token login
+
+Use a Personal Access Token as the default login path:
+
+```bash
+cli-anything-gitcode auth login --token your-token
+cli-anything-gitcode --json auth status
+```
+
+The token is stored at:
+
+```text
+~/.config/cli-anything-gitcode/auth.json
+```
+
+The auth file is written with `0600` permissions and tokens are never stored in project JSON files.
+
+### Environment token
 
 ```bash
 export GITCODE_TOKEN=your-token
@@ -57,6 +84,26 @@ You can also pass a token for one command:
 cli-anything-gitcode --token your-token --project gitcode-test.json issue create --title "Bug"
 ```
 
+### OAuth login
+
+GitCode appears to support OAuth authorization-code login, not device-code login. OAuth is still available if you need it, but PAT login is simpler for most CLI use. Create a GitCode OAuth app first and register this redirect URI:
+
+```text
+http://127.0.0.1:8765/callback
+```
+
+Then configure and login:
+
+```bash
+cli-anything-gitcode auth setup --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET --redirect-port 8765
+cli-anything-gitcode auth login
+cli-anything-gitcode --json auth status
+```
+
+OAuth `auth login` starts a one-shot local callback server and opens the browser.
+
+Use `auth logout` to remove saved tokens while keeping OAuth app configuration. Use `auth logout --all` to remove all saved auth configuration.
+
 For tests or self-hosted/alternate API deployments, override the API base:
 
 ```bash
@@ -64,8 +111,6 @@ export GITCODE_API_BASE=http://127.0.0.1:8000/api/v5
 # or
 cli-anything-gitcode --api-base http://127.0.0.1:8000/api/v5 ...
 ```
-
-Tokens are never stored in project JSON files.
 
 ## Quick start
 
@@ -122,6 +167,14 @@ cli-anything-gitcode
 ```
 
 ## Command groups
+
+### `auth`
+
+- `auth setup --client-id ID --client-secret SECRET [--redirect-host HOST] [--redirect-port PORT] [--scope SCOPE ...]`
+- `auth login --token TOKEN`
+- `auth login [--host gitcode.com] [--redirect-port PORT] [--no-browser] [--print-url] [--timeout SECONDS]`
+- `auth status`
+- `auth logout [--all]`
 
 ### `project`
 
@@ -200,4 +253,4 @@ Run subprocess tests against the installed PATH command:
 CLI_ANYTHING_FORCE_INSTALLED=1 python -m pytest cli_anything/gitcode/tests -v -s --tb=no
 ```
 
-API tests use a local mock HTTP server and do not create live GitCode issues, PRs, or review comments.
+API, PAT, and OAuth tests use local mock HTTP servers and temporary auth files. They do not create live GitCode issues, PRs, review comments, or OAuth sessions.

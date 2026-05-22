@@ -4,9 +4,15 @@
 from __future__ import annotations
 
 import json
+import secrets
 import shlex
 import sys
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import click
 
@@ -16,8 +22,9 @@ from cli_anything.gitcode.core import project as project_mod
 from cli_anything.gitcode.core import pulls as pulls_mod
 from cli_anything.gitcode.core import reviews as reviews_mod
 from cli_anything.gitcode.core.session import Session
+from cli_anything.gitcode.utils import gitcode_auth
 from cli_anything.gitcode.utils import gitcode_backend as backend
-from cli_anything.gitcode.utils.gitcode_api import GitCodeAPIError, GitCodeClient
+from cli_anything.gitcode.utils.gitcode_api import GitCodeAPIError, GitCodeClient, exchange_oauth_code
 
 _session: Session | None = None
 _json_output = False
@@ -129,6 +136,187 @@ def auto_save_on_exit(result, use_json, project_path, dry_run, api_base, token, 
             sess.save_session()
         except Exception as exc:
             click.echo(f"Warning: Auto-save failed: {exc}", err=True)
+
+
+@cli.group()
+def auth():
+    """GitCode OAuth authentication commands."""
+    pass
+
+
+@auth.command("setup")
+@click.option("--client-id", required=True, help="GitCode OAuth app client ID")
+@click.option("--client-secret", required=True, help="GitCode OAuth app client secret")
+@click.option("--redirect-host", default="127.0.0.1", show_default=True, help="OAuth callback host")
+@click.option("--redirect-port", type=int, default=8765, show_default=True, help="OAuth callback port")
+@click.option("--scope", "scopes", multiple=True, help="OAuth scope; may be repeated")
+@handle_error
+def auth_setup(client_id, client_secret, redirect_host, redirect_port, scopes):
+    """Save OAuth app configuration."""
+    existing = gitcode_auth.load_auth()
+    existing.update({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_host": redirect_host,
+        "redirect_port": redirect_port,
+        "scopes": list(scopes),
+    })
+    gitcode_auth.save_auth(existing)
+    output({
+        "auth_file": str(gitcode_auth.config_path()),
+        "configured": True,
+        "authenticated": bool(existing.get("access_token")),
+        "client_id": client_id,
+        "has_client_secret": True,
+        "redirect_uri": gitcode_auth.redirect_uri(existing),
+        "scopes": list(scopes),
+    }, "GitCode OAuth app configuration saved")
+
+
+@auth.command("status")
+@handle_error
+def auth_status():
+    """Show saved GitCode auth status."""
+    output(gitcode_auth.status())
+
+
+@auth.command("logout")
+@click.option("--all", "all_config", is_flag=True, help="Remove OAuth app config as well as saved tokens")
+@handle_error
+def auth_logout(all_config):
+    """Remove saved GitCode OAuth tokens."""
+    remaining = gitcode_auth.clear_auth(all_config=all_config)
+    output({
+        "auth_file": str(gitcode_auth.config_path()),
+        "configured": bool(remaining.get("client_id") and remaining.get("client_secret")),
+        "authenticated": False,
+        "removed_all": all_config,
+    }, "GitCode auth cleared")
+
+
+@auth.command("login")
+@click.option("--host", default="gitcode.com", show_default=True, help="GitCode host or OAuth base URL")
+@click.option("--redirect-port", type=int, default=None, help="Override callback port for this login")
+@click.option("--no-browser", is_flag=True, help="Print URL without opening a browser")
+@click.option("--print-url", is_flag=True, help="Print authorization URL before waiting for callback")
+@click.option("--timeout", "timeout_seconds", type=int, default=180, show_default=True, help="Seconds to wait for OAuth callback")
+@click.option("--token", "pat_token", default=None, help="Save a GitCode Personal Access Token instead of using OAuth")
+@handle_error
+def auth_login(host, redirect_port, no_browser, print_url, timeout_seconds, pat_token):
+    """Login with a GitCode Personal Access Token or OAuth authorization-code flow."""
+    if pat_token is not None:
+        saved = gitcode_auth.save_personal_access_token(pat_token)
+        output({
+            "auth_file": str(gitcode_auth.config_path()),
+            "authenticated": True,
+            "configured": bool(saved.get("client_id") and saved.get("client_secret")),
+            "token_source": "personal_access_token",
+            "access_token": gitcode_auth.redact_token(saved.get("access_token")),
+        }, "GitCode Personal Access Token saved")
+        return
+    config = gitcode_auth.load_auth()
+    client_id = config.get("client_id")
+    client_secret = config.get("client_secret")
+    if not client_id or not client_secret:
+        raise RuntimeError("Run auth setup with a GitCode OAuth client_id and client_secret before auth login.")
+    result = _run_oauth_login(config, host, redirect_port, no_browser, print_url, timeout_seconds)
+    output(result, "GitCode OAuth login completed")
+
+
+def _run_oauth_login(config: dict, host: str, redirect_port: int | None, no_browser: bool, print_url: bool, timeout_seconds: int) -> dict:
+    resolved_port = redirect_port if redirect_port is not None else int(config.get("redirect_port") or 8765)
+    callback = _OAuthCallbackServer(config.get("redirect_host") or "127.0.0.1", resolved_port)
+    callback.start()
+    try:
+        redirect_uri = f"http://{callback.host}:{callback.port}/callback"
+        state = secrets.token_urlsafe(24)
+        query = {
+            "client_id": config["client_id"],
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "state": state,
+        }
+        scopes = config.get("scopes") or []
+        if scopes:
+            query["scope"] = " ".join(scopes)
+        authorize_base = f"https://{host}/oauth/authorize" if not host.startswith("http://") and not host.startswith("https://") else host.rstrip("/") + "/oauth/authorize"
+        authorize_url = f"{authorize_base}?{urlencode(query)}"
+        if print_url or no_browser:
+            click.echo(authorize_url)
+        if not no_browser:
+            webbrowser.open(authorize_url)
+        callback_result = callback.wait(timeout_seconds)
+        if callback_result.get("error"):
+            raise RuntimeError(f"OAuth callback failed: {callback_result['error']}")
+        if callback_result.get("state") != state:
+            raise RuntimeError("OAuth callback state did not match")
+        code = callback_result.get("code")
+        if not code:
+            raise RuntimeError("OAuth callback did not include a code")
+        token_payload = exchange_oauth_code(host, config["client_id"], config["client_secret"], code, redirect_uri)
+        updated = {**config, **(token_payload or {})}
+        updated["redirect_host"] = callback.host
+        updated["redirect_port"] = callback.port
+        updated["token_source"] = "oauth"
+        gitcode_auth.save_auth(updated)
+        return {
+            "auth_file": str(gitcode_auth.config_path()),
+            "authenticated": bool(updated.get("access_token")),
+            "configured": True,
+            "token_source": "oauth",
+            "access_token": gitcode_auth.redact_token(updated.get("access_token")),
+            "refresh_token": gitcode_auth.redact_token(updated.get("refresh_token")),
+            "token_type": updated.get("token_type"),
+            "redirect_uri": redirect_uri,
+        }
+    finally:
+        callback.stop()
+
+
+class _OAuthCallbackServer:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self._event = threading.Event()
+        self._result: dict = {}
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                parsed = urlparse(self.path)
+                params = parse_qs(parsed.query)
+                outer._result = {
+                    "code": (params.get("code") or [None])[0],
+                    "state": (params.get("state") or [None])[0],
+                    "error": (params.get("error") or [None])[0],
+                }
+                body = b"GitCode CLI authentication complete. You can close this window."
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                outer._event.set()
+
+        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+        self.port = self._server.server_port
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def wait(self, timeout_seconds: int) -> dict:
+        if not self._event.wait(timeout_seconds):
+            raise RuntimeError("Timed out waiting for GitCode OAuth callback")
+        return self._result
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
 
 
 @cli.group()
@@ -445,6 +633,7 @@ def repl():
     skin.print_banner()
     pt_session = skin.create_prompt_session()
     commands = {
+        "auth": "setup|login|status|logout",
         "project": "new|open|save|info|set-local|note",
         "repo": "clone|status|refs",
         "issue": "list|get|create|comment",

@@ -1,13 +1,13 @@
 ---
 name: "cli-anything-gitcode"
-description: "Operate GitCode repository pages, local clones, issues, pull requests, and review comments through a stateful CLI backed by real git and GitCode API v5. Use for GitCode URLs, repository intake, clone/status/ref inspection, issue creation, PR creation, review comments, and JSON reports."
+description: "Operate GitCode repository pages, local clones, Personal Access Token or OAuth login, issues, pull requests, and review comments through a stateful CLI backed by real git and GitCode API v5. Use for GitCode URLs, repository intake, auth login, clone/status/ref inspection, issue creation, PR creation, review comments, and JSON reports."
 ---
 
 # GitCode CLI Skill
 
 Use `cli-anything-gitcode` when you need to turn a GitCode repository page into an agent-operable command surface.
 
-The CLI uses the real `git` executable for local repository operations and GitCode API v5 for issue, pull request, and review-comment workflows.
+The CLI uses the real `git` executable for local repository operations and GitCode API v5 for issue, pull request, and review-comment workflows. It supports Personal Access Token login as the default path, with GitCode OAuth authorization-code login available as an advanced fallback.
 
 ## Install
 
@@ -21,7 +21,47 @@ which cli-anything-gitcode
 
 ## Authentication
 
-Read commands may work for public repositories without a token. Write commands require a token:
+Read commands may work for public repositories without a token. Write commands require a token.
+
+Token resolution order:
+
+1. root `--token`
+2. `GITCODE_TOKEN`
+3. `GITCODE_ACCESS_TOKEN`
+4. saved Personal Access Token or OAuth token from `auth login`
+
+### Personal Access Token login
+
+Use a Personal Access Token for the lowest-friction CLI setup:
+
+```bash
+cli-anything-gitcode auth login --token YOUR_TOKEN
+cli-anything-gitcode --json auth status
+```
+
+Tokens are stored outside project JSON at `~/.config/cli-anything-gitcode/auth.json` with `0600` permissions. Use `auth logout` to remove tokens and `auth logout --all` to remove all auth config.
+
+### OAuth login
+
+OAuth remains available when a browser authorization-code flow is preferred.
+
+Create a GitCode OAuth app and register this redirect URI:
+
+```text
+http://127.0.0.1:8765/callback
+```
+
+Then run:
+
+```bash
+cli-anything-gitcode auth setup --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET --redirect-port 8765
+cli-anything-gitcode auth login
+cli-anything-gitcode --json auth status
+```
+
+GitCode device-code login was not found during probing; this CLI uses authorization-code login.
+
+### Environment token
 
 ```bash
 export GITCODE_TOKEN=your-token
@@ -30,8 +70,6 @@ export GITCODE_ACCESS_TOKEN=your-token
 ```
 
 You can also pass `--token` for one command. Use `GITCODE_API_BASE` or `--api-base` to target a mock server or alternate GitCode API base.
-
-Tokens are never stored in project JSON.
 
 ## Agent defaults
 
@@ -50,6 +88,19 @@ cli-anything-gitcode --json --project gitcode-test.json session status
 Use `--dry-run` when testing local project mutations without saving changes. `--dry-run` does not fake remote write commands.
 
 ## Command groups
+
+### `auth`
+
+Configure and manage saved tokens. Prefer Personal Access Token login unless OAuth is specifically needed.
+
+```bash
+cli-anything-gitcode --json auth status
+cli-anything-gitcode auth login --token YOUR_TOKEN
+cli-anything-gitcode auth setup --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET --redirect-port 8765
+cli-anything-gitcode auth login
+cli-anything-gitcode auth logout
+cli-anything-gitcode auth logout --all
+```
 
 ### `project`
 
@@ -135,6 +186,7 @@ Inside the REPL, use the same subcommands without the top-level executable name.
 ## Typical workflow
 
 ```bash
+cli-anything-gitcode auth login --token YOUR_TOKEN
 cli-anything-gitcode --json project new https://gitcode.com/gcw_CSGJYRfL/test -o gitcode-test.json
 cli-anything-gitcode --project gitcode-test.json repo clone ./test
 cli-anything-gitcode --json --project gitcode-test.json issue list
@@ -146,5 +198,5 @@ cli-anything-gitcode --json --project gitcode-test.json export report gitcode-re
 
 - Missing `git` is a hard dependency error with install instructions.
 - `repo status` requires either an explicit path or a project with `local_path` set.
-- API write commands require `GITCODE_TOKEN`, `GITCODE_ACCESS_TOKEN`, or `--token`.
+- API write commands require `auth login --token YOUR_TOKEN`, OAuth `auth login`, `GITCODE_TOKEN`, `GITCODE_ACCESS_TOKEN`, or root `--token`.
 - `export report` refuses to overwrite existing files unless `--overwrite` is passed.

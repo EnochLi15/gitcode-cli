@@ -6,7 +6,9 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -60,13 +62,16 @@ def mock_api():
         def _record(self):
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b""
-            payload = json.loads(raw.decode("utf-8")) if raw else None
+            content_type = self.headers.get("Content-Type", "")
+            payload = json.loads(raw.decode("utf-8")) if raw and content_type == "application/json" else None
+            form = parse_qs(raw.decode("utf-8")) if raw and content_type == "application/x-www-form-urlencoded" else None
             record = {
                 "method": self.command,
                 "path": self.path,
                 "authorization": self.headers.get("Authorization"),
                 "private_token": self.headers.get("PRIVATE-TOKEN"),
                 "payload": payload,
+                "form": form,
             }
             records.append(record)
             return record
@@ -88,7 +93,9 @@ def mock_api():
 
         def do_POST(self):
             record = self._record()
-            if self.path == "/api/v5/repos/gcw_CSGJYRfL/test/issues":
+            if self.path == "/oauth/token":
+                self._send(200, {"access_token": "oauth-token", "refresh_token": "refresh-token", "token_type": "bearer"})
+            elif self.path == "/api/v5/repos/gcw_CSGJYRfL/test/issues":
                 self._send(201, {"number": 8, "title": record["payload"].get("title")})
             elif self.path == "/api/v5/repos/gcw_CSGJYRfL/test/issues/8/comments":
                 self._send(201, {"id": 10, "body": record["payload"].get("body")})
@@ -103,7 +110,7 @@ def mock_api():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}/api/v5", records
+        yield f"http://127.0.0.1:{server.server_port}", f"http://127.0.0.1:{server.server_port}/api/v5", records
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -122,9 +129,103 @@ class TestCLISubprocess:
         result = self._run(["--help"])
         assert result.returncode == 0
         assert "GitCode CLI" in result.stdout
+        assert "auth" in result.stdout
         assert "issue" in result.stdout
         assert "pr" in result.stdout
         assert "review" in result.stdout
+
+    def test_auth_setup_status_logout(self, tmp_path):
+        auth_file = tmp_path / "auth.json"
+        env = {"GITCODE_AUTH_FILE": str(auth_file)}
+        status = self._run(["--json", "auth", "status"], env=env)
+        assert json.loads(status.stdout)["configured"] is False
+        setup = self._run([
+            "--json", "auth", "setup", "--client-id", "cid", "--client-secret", "super-private-value", "--redirect-port", "8765", "--scope", "user_info",
+        ], env=env)
+        setup_data = json.loads(setup.stdout)
+        assert setup_data["configured"] is True
+        assert setup_data["has_client_secret"] is True
+        assert "super-private-value" not in setup.stdout
+        status = self._run(["--json", "auth", "status"], env=env)
+        status_data = json.loads(status.stdout)
+        assert status_data["configured"] is True
+        assert status_data["authenticated"] is False
+        logout = self._run(["--json", "auth", "logout"], env=env)
+        assert json.loads(logout.stdout)["configured"] is True
+        logout_all = self._run(["--json", "auth", "logout", "--all"], env=env)
+        assert json.loads(logout_all.stdout)["configured"] is False
+        assert not auth_file.exists()
+
+    def test_auth_login_with_personal_access_token(self, tmp_path, mock_api):
+        _oauth_base, api_base, records = mock_api
+        auth_file = tmp_path / "auth.json"
+        project = tmp_path / "project.json"
+        env = {
+            "GITCODE_AUTH_FILE": str(auth_file),
+            "GITCODE_API_BASE": api_base,
+            "GITCODE_TOKEN": "",
+            "GITCODE_ACCESS_TOKEN": "",
+        }
+        self._run(["project", "new", "https://gitcode.com/gcw_CSGJYRfL/test", "-o", str(project)])
+        login = self._run(["--json", "auth", "login", "--token", "pat-token"], env=env)
+        login_data = json.loads(login.stdout)
+        assert login_data["authenticated"] is True
+        assert login_data["token_source"] == "personal_access_token"
+        assert "pat-token" not in login.stdout
+        status = self._run(["--json", "auth", "status"], env=env)
+        assert json.loads(status.stdout)["token_source"] == "personal_access_token"
+        created = self._run([
+            "--json", "--project", str(project), "issue", "create", "--title", "PAT issue",
+        ], env=env)
+        assert json.loads(created.stdout)["data"]["number"] == 8
+        issue_post = [record for record in records if record["path"] == "/api/v5/repos/gcw_CSGJYRfL/test/issues"][-1]
+        assert issue_post["authorization"] == "Bearer pat-token"
+
+    def test_auth_login_and_saved_token_for_issue_create(self, tmp_path, mock_api):
+        oauth_base, api_base, records = mock_api
+        auth_file = tmp_path / "auth.json"
+        project = tmp_path / "project.json"
+        env = {
+            "GITCODE_AUTH_FILE": str(auth_file),
+            "GITCODE_API_BASE": api_base,
+            "GITCODE_TOKEN": "",
+            "GITCODE_ACCESS_TOKEN": "",
+            "PYTHONUNBUFFERED": "1",
+        }
+        self._run(["project", "new", "https://gitcode.com/gcw_CSGJYRfL/test", "-o", str(project)])
+        self._run(["auth", "setup", "--client-id", "cid", "--client-secret", "secret", "--redirect-port", "0"], env=env)
+        proc = subprocess.Popen(
+            self.CLI_BASE + ["auth", "login", "--host", oauth_base, "--redirect-port", "0", "--no-browser", "--print-url", "--timeout", "10"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ.copy(), **env},
+        )
+        try:
+            authorize_url = proc.stdout.readline().strip()
+            parsed = urlparse(authorize_url)
+            query = parse_qs(parsed.query)
+            redirect_uri = query["redirect_uri"][0]
+            state = query["state"][0]
+            with urllib.request.urlopen(f"{redirect_uri}?code=test-code&state={state}", timeout=5) as resp:
+                assert resp.status == 200
+            stdout, stderr = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        assert proc.returncode == 0, stderr
+        saved = json.loads(auth_file.read_text(encoding="utf-8"))
+        assert saved["access_token"] == "oauth-token"
+        assert saved["refresh_token"] == "refresh-token"
+        token_exchange = [record for record in records if record["path"] == "/oauth/token"][-1]
+        assert token_exchange["form"]["code"] == ["test-code"]
+        created = self._run([
+            "--json", "--project", str(project), "issue", "create", "--title", "Saved token issue",
+        ], env=env)
+        assert json.loads(created.stdout)["data"]["number"] == 8
+        issue_post = [record for record in records if record["path"] == "/api/v5/repos/gcw_CSGJYRfL/test/issues"][-1]
+        assert issue_post["authorization"] == "Bearer oauth-token"
+        assert issue_post["payload"]["access_token"] == "oauth-token"
 
     def test_project_new_json(self, tmp_path):
         out = tmp_path / "project.json"
@@ -176,7 +277,7 @@ class TestCLISubprocess:
         print(f"\n  Markdown report: {report} ({report.stat().st_size:,} bytes)")
 
     def test_issue_pr_review_commands_with_mock_api(self, tmp_path, mock_api):
-        base, records = mock_api
+        _oauth_base, base, records = mock_api
         project = tmp_path / "project.json"
         env = {"GITCODE_API_BASE": base, "GITCODE_TOKEN": "test-token"}
         self._run(["project", "new", "https://gitcode.com/gcw_CSGJYRfL/test", "-o", str(project)])
@@ -205,7 +306,7 @@ class TestCLISubprocess:
             "--json", "--project", str(project), "review", "submit", "3", "--body", "Looks good", "--path", "README.md", "--line", "1", "--commit-id", "abc",
         ], env=env)
         assert json.loads(review_submit.stdout)["data"]["id"] == 11
-        write_records = [record for record in records if record["method"] == "POST"]
+        write_records = [record for record in records if record["method"] == "POST" and record["path"].startswith("/api/v5")]
         assert write_records
         assert all(record["authorization"] == "Bearer test-token" for record in write_records)
         assert write_records[0]["payload"]["title"] == "Bug"
@@ -213,12 +314,13 @@ class TestCLISubprocess:
         assert write_records[-1]["payload"]["line"] == 1
 
     def test_write_command_requires_token(self, tmp_path, mock_api):
-        base, _records = mock_api
+        _oauth_base, base, _records = mock_api
         project = tmp_path / "project.json"
+        env = {"GITCODE_AUTH_FILE": str(tmp_path / "auth.json"), "GITCODE_TOKEN": "", "GITCODE_ACCESS_TOKEN": ""}
         self._run(["project", "new", "https://gitcode.com/gcw_CSGJYRfL/test", "-o", str(project)])
         result = self._run([
             "--json", "--api-base", base, "--project", str(project), "issue", "create", "--title", "No token",
-        ], check=False)
+        ], check=False, env=env)
         assert result.returncode == 1
         data = json.loads(result.stdout)
         assert data["type"] == "GitCodeAPIError"

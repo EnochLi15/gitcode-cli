@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -14,7 +18,18 @@ from cli_anything.gitcode.core import reviews as reviews_mod
 from cli_anything.gitcode.core.project import create_project, inspect_local, load_project, save_project
 from cli_anything.gitcode.core.repository import parse_repository_url
 from cli_anything.gitcode.core.session import Session
-from cli_anything.gitcode.utils.gitcode_api import GitCodeAPIError, GitCodeClient
+from cli_anything.gitcode.utils import gitcode_auth
+from cli_anything.gitcode.utils.gitcode_api import GitCodeAPIError, GitCodeClient, exchange_oauth_code
+
+
+def test_skill_copies_stay_in_sync():
+    repo_root = Path(__file__).resolve().parents[4]
+    root_skill = repo_root / "skills/cli-anything-gitcode/SKILL.md"
+    harness_skill = repo_root / "agent-harness/skills/cli-anything-gitcode/SKILL.md"
+    packaged_skill = repo_root / "agent-harness/cli_anything/gitcode/skills/SKILL.md"
+
+    assert root_skill.read_text(encoding="utf-8") == harness_skill.read_text(encoding="utf-8")
+    assert root_skill.read_text(encoding="utf-8") == packaged_skill.read_text(encoding="utf-8")
 
 
 def _make_git_repo(tmp_path):
@@ -49,13 +64,15 @@ def mock_api():
         def _record(self):
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b""
-            payload = json.loads(raw.decode("utf-8")) if raw else None
+            payload = json.loads(raw.decode("utf-8")) if raw and self.headers.get("Content-Type") == "application/json" else None
+            form = parse_qs(raw.decode("utf-8")) if raw and self.headers.get("Content-Type") == "application/x-www-form-urlencoded" else None
             record = {
                 "method": self.command,
                 "path": self.path,
                 "authorization": self.headers.get("Authorization"),
                 "private_token": self.headers.get("PRIVATE-TOKEN"),
                 "payload": payload,
+                "form": form,
             }
             records.append(record)
             return record
@@ -79,7 +96,9 @@ def mock_api():
 
         def do_POST(self):
             record = self._record()
-            if self.path == "/api/v5/repos/gcw_CSGJYRfL/test/issues":
+            if self.path == "/oauth/token":
+                self._send(200, {"access_token": "oauth-token", "refresh_token": "refresh-token", "token_type": "bearer"})
+            elif self.path == "/api/v5/repos/gcw_CSGJYRfL/test/issues":
                 self._send(201, {"number": 8, "title": record["payload"].get("title")})
             elif self.path == "/api/v5/repos/gcw_CSGJYRfL/test/issues/8/comments":
                 self._send(201, {"id": 10, "body": record["payload"].get("body")})
@@ -94,10 +113,17 @@ def mock_api():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}/api/v5", records
+        yield f"http://127.0.0.1:{server.server_port}", f"http://127.0.0.1:{server.server_port}/api/v5", records
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+@pytest.fixture
+def auth_file(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    monkeypatch.setenv("GITCODE_AUTH_FILE", str(path))
+    return path
 
 
 def test_parse_repository_url():
@@ -185,7 +211,7 @@ def test_api_client_requires_token_for_writes():
 
 
 def test_api_client_get_and_error(mock_api):
-    base, records = mock_api
+    _oauth_base, base, records = mock_api
     client = GitCodeClient(base, token="secret")
     result = client.get("/repos/gcw_CSGJYRfL/test/issues", params={"state": "open"})
     assert result["data"][0]["number"] == 1
@@ -198,7 +224,7 @@ def test_api_client_get_and_error(mock_api):
 
 
 def test_issue_pull_review_core_functions(mock_api):
-    base, records = mock_api
+    _oauth_base, base, records = mock_api
     project = create_project("https://gitcode.com/gcw_CSGJYRfL/test")
     client = GitCodeClient(base, token="secret")
     assert issues_mod.list_issues(project, client)["data"][0]["number"] == 1
@@ -211,3 +237,50 @@ def test_issue_pull_review_core_functions(mock_api):
     assert reviews_mod.submit_review_comment(project, client, 3, "Looks good", path="README.md", line=1, commit_id="abc")["data"]["id"] == 11
     assert records[-1]["payload"]["path"] == "README.md"
     assert records[-1]["payload"]["line"] == 1
+
+
+def test_auth_save_load_permissions_and_redaction(auth_file):
+    gitcode_auth.save_auth({"client_id": "cid", "client_secret": "secret", "access_token": "abcdefghijklmnop"})
+    assert gitcode_auth.load_auth()["client_id"] == "cid"
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+    assert gitcode_auth.redact_token("abcdefghijklmnop") == "abcd********mnop"
+    assert gitcode_auth.status()["access_token"] == "abcd********mnop"
+
+
+def test_auth_save_personal_access_token(auth_file):
+    gitcode_auth.save_auth({"client_id": "cid", "client_secret": "secret", "refresh_token": "old-refresh"})
+    saved = gitcode_auth.save_personal_access_token(" pat-token ")
+    assert saved["access_token"] == "pat-token"
+    assert saved["token_source"] == "personal_access_token"
+    assert "refresh_token" not in saved
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+    status = gitcode_auth.status()
+    assert status["authenticated"] is True
+    assert status["token_source"] == "personal_access_token"
+
+
+def test_auth_clear_preserves_config_by_default(auth_file):
+    gitcode_auth.save_auth({"client_id": "cid", "client_secret": "secret", "access_token": "token", "refresh_token": "refresh"})
+    remaining = gitcode_auth.clear_auth()
+    assert remaining["client_id"] == "cid"
+    assert "access_token" not in remaining
+    assert auth_file.exists()
+    gitcode_auth.clear_auth(all_config=True)
+    assert not auth_file.exists()
+
+
+def test_saved_token_resolution(auth_file, monkeypatch):
+    monkeypatch.delenv("GITCODE_TOKEN", raising=False)
+    monkeypatch.delenv("GITCODE_ACCESS_TOKEN", raising=False)
+    gitcode_auth.save_auth({"access_token": "saved-token"})
+    assert GitCodeClient.from_env().token == "saved-token"
+    assert GitCodeClient.from_env(token="explicit-token").token == "explicit-token"
+
+
+def test_oauth_token_exchange(mock_api):
+    oauth_base, _api_base, records = mock_api
+    result = exchange_oauth_code(oauth_base, "cid", "secret", "test-code", "http://127.0.0.1:8765/callback")
+    assert result["access_token"] == "oauth-token"
+    assert records[-1]["path"] == "/oauth/token"
+    assert records[-1]["form"]["grant_type"] == ["authorization_code"]
+    assert records[-1]["form"]["code"] == ["test-code"]
