@@ -380,7 +380,10 @@ test("label, release, search, and browse commands are wired", async () => {
     assert.equal(JSON.parse((await run(["release", "list", "--json", "tagName"], { env })).stdout)[0].tagName, "v1.0.0");
     assert.match((await run(["release", "view", "v1.0.0"], { env })).stdout, /notes/);
     assert.equal(JSON.parse((await run(["release", "create", "v2.0.0", "--title", "two", "--notes", "notes", "--json", "tagName"], { env })).stdout).tagName, "v2.0.0");
-    assert.match((await run(["release", "delete", "v2.0.0"], { env })).stdout, /Deleted release/);
+    const guardedDelete = await run(["release", "delete", "v2.0.0", "-R", "gcw_CSGJYRfL/test"], { env });
+    assert.equal(guardedDelete.code, 1);
+    assert.match(guardedDelete.stderr, /--cleanup-tag/);
+    assert.match((await run(["release", "delete", "v2.0.0", "--cleanup-tag"], { env })).stdout, /Deleted release/);
     assert.equal(JSON.parse((await run(["search", "repos", "hello", "--json"], { env })).stdout)[0].fullName, "gcw_CSGJYRfL/test");
     assert.equal(JSON.parse((await run(["search", "issues", "seeded", "--state", "open", "--json", "title"], { env })).stdout)[0].title, "seeded issue");
     assert.equal((await run(["browse", "issues/7"], { env })).stdout.trim(), "https://gitcode.com/gcw_CSGJYRfL/test/issues/7");

@@ -15,7 +15,7 @@ GitCode API behavior take priority.
 | Organizations | GitCode-specific | `org list`, `view`, `repos`, `members` | Narrow account administration slice, not full enterprise administration. |
 | SSH Keys | GitCode-specific | `ssh-key list`, `add`, `delete` | Covers the basic key lifecycle only. |
 | Labels | gh-like | `label list`, `create`, `edit`, `delete` | Color and description fields follow GitCode API names. |
-| Releases | gh-like | `release list`, `view`, `create`, `delete` | Asset upload is best-effort through GitCode API support. |
+| Releases | gh-like with guard | `release list`, `view`, `create`, `delete --cleanup-tag` | GitCode currently has list/view/update release APIs but no release-only delete endpoint. `release delete TAG` asks for explicit `--cleanup-tag` before deleting the tag that backs the release. Asset upload is best-effort through GitCode API support. |
 | Search | gh-like | `search repos`, `issues`, `prs` | Search result normalization is intentionally small and script-friendly. |
 | Browse | exact enough | `browse`, `browse issues/N`, `browse pulls/N`, `browse tree/...`, `browse blob/...` | Opens GitCode URLs; `GITCODE_NO_BROWSER=1` prints URLs for tests and agents. |
 | Config/Alias/Completion | gh-like | `config get/set/list`, `alias set/list/delete`, `completion` | Alias expansion is local to this CLI config. |

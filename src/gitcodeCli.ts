@@ -624,7 +624,8 @@ async function releaseCommand(ctx: GitCodeContext, args: string[]): Promise<void
   }
   if (sub === "delete") {
     const tag = needArg(args.shift(), "Usage: gc release delete TAG");
-    await deleteRelease(repo, tag);
+    const cleanupTag = takeFlag(args, "--cleanup-tag");
+    await deleteRelease(repo, tag, cleanupTag);
     return emit(ctx, { tagName: tag }, `Deleted release ${tag}`);
   }
   throw new CliError("Usage: gc release <list|view|create|delete>");
@@ -1260,12 +1261,15 @@ async function prDiscussionRequest(repo: RepoRef, number: string, endpoint: stri
   }
 }
 
-async function deleteRelease(repo: RepoRef, tag: string): Promise<void> {
+async function deleteRelease(repo: RepoRef, tag: string, cleanupTag: boolean): Promise<void> {
   try {
     await apiRequest(`${repoApiPath(repo)}/releases/${encodeURIComponent(tag)}`, { method: "DELETE", requireAuth: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!/GitCode API 405/.test(message)) throw error;
+    if (!cleanupTag) {
+      throw new CliError("GitCode does not support release-only deletion for this API. Re-run with `--cleanup-tag` to delete the tag and remove the release.");
+    }
     await apiRequest(`${repoApiPath(repo)}/tags/${encodeURIComponent(tag)}`, { method: "DELETE", requireAuth: true });
   }
 }
@@ -1497,7 +1501,7 @@ function help(command?: string, subcommand?: string): void {
     "ssh-key": "Usage: gc ssh-key <list|add|delete>\n\nExamples:\n  gc ssh-key list --json id,title\n  gc ssh-key add --title laptop --key-file ~/.ssh/id_ed25519.pub",
     workflow: "Usage: gc workflow <init|push|diff>\n\nExamples:\n  gc workflow init -R OWNER/REPO --commit-message 'Initial commit'\n  gc workflow push --set-upstream\n  gc workflow diff --staged --name-only",
     label: "Usage: gc label <list|create|edit|delete>",
-    release: "Usage: gc release <list|view|create|delete>",
+    release: "Usage: gc release <list|view|create|delete>\n\nExamples:\n  gc release list -R OWNER/REPO --json tagName,name\n  gc release delete v1.0.0 --cleanup-tag",
     search: "Usage: gc search <repos|issues|prs> QUERY [--state STATE] [--owner OWNER] [-R OWNER/REPO]",
     browse: "Usage: gc browse [issues|issues/N|pulls/N|releases/TAG|tree/BRANCH|blob/BRANCH/PATH]\n\nExamples:\n  gc browse -R OWNER/REPO issues\n  gc browse pulls/12",
     config: "Usage: gc config <get|set|list>\n\nExamples:\n  gc config set pager false\n  gc config get pager --json",

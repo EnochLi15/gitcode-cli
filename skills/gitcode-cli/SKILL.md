@@ -36,6 +36,10 @@ gc api repos/OWNER/REPO/issues --paginate --json number,title
   opening the user's browser.
 - Treat `issue close`, `pr merge`, `ssh-key delete`, `label delete`, and
   `release delete` as mutating operations that need clear user intent.
+- Use `gc release delete TAG --cleanup-tag` only when the user explicitly wants
+  to delete the backing Git tag; GitCode does not provide release-only deletion.
+- Prefer `gc issue list -R OWNER/REPO` for exact repository issue state.
+  `gc search issues` is discovery-oriented and may lag behind recent writes.
 
 ## Common Flows
 
@@ -43,6 +47,7 @@ gc api repos/OWNER/REPO/issues --paginate --json number,title
 gc issue list -R OWNER/REPO --state open --json number,title --jq '.[0].title'
 gc issue comment 12 -R OWNER/REPO --body "Investigating"
 gc pr diff 7 -R OWNER/REPO --name-only
+gc release delete v1.2.3 -R OWNER/REPO --cleanup-tag
 gc workflow diff --staged --name-only
 gc workflow push --set-upstream
 ```

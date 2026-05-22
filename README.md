@@ -102,6 +102,7 @@ gc ssh-key add --title laptop --key-file ~/.ssh/id_ed25519.pub
 
 gc label list
 gc release list
+gc release delete v1.0.0 --cleanup-tag
 gc search issues "sandbox marker" -R gcw_CSGJYRfL/test --state open
 gc browse -R gcw_CSGJYRfL/test issues
 ```
@@ -143,6 +144,11 @@ External commands named `gc-<name>` on `PATH` are treated as extensions.
 GitHub-only product areas without GitCode equivalents are intentionally
 unsupported; see [`docs/gh-compatibility-matrix.md`](docs/gh-compatibility-matrix.md)
 and [`docs/gh-compatibility-boundary.md`](docs/gh-compatibility-boundary.md).
+
+GitCode does not expose a release-only delete endpoint in the current release
+API. `gc release delete TAG` will fail with guidance when release-only deletion
+is unavailable; pass `--cleanup-tag` to delete the tag, which removes the
+GitCode release associated with that tag.
 
 ## Agent Skill
 

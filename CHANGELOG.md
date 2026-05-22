@@ -20,6 +20,9 @@ should move completed bullets under a version heading with the release date.
   guidance for agents.
 - Extracted completion command handling into a command module to establish the
   incremental command-module pattern.
+- Hardened live GitCode API behavior for form-encoded writes, PR review
+  fallback comments, merge branch cleanup, organization listing fallback, and
+  guarded release deletion through `--cleanup-tag`.
 
 ## 0.1.0
 
