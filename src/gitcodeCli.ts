@@ -48,6 +48,7 @@ export async function runGitCodeCli(argv: string[]): Promise<void> {
   if (!command || command === "help" || ctx.web && command === "--help") return help();
   if (command === "--help" || command === "-h") return help();
   if (command === "--version") return console.log("0.1.0");
+  if (args.includes("--help") || args.includes("-h")) return help();
 
   try {
     if (command === "auth") return authCommand(ctx, args);
@@ -669,7 +670,8 @@ function emit(ctx: GitCodeContext, data: unknown, human?: string): void {
   const selected = ctx.jsonFields?.length ? selectFields(data, ctx.jsonFields) : data;
   const filtered = ctx.jq ? applyJq(selected, ctx.jq) : selected;
   if (ctx.json || ctx.jq || ctx.jsonFields?.length) {
-    console.log(typeof filtered === "string" ? JSON.stringify(filtered) : JSON.stringify(filtered, null, 2));
+    const jsonValue = filtered === undefined ? null : filtered;
+    console.log(typeof jsonValue === "string" ? JSON.stringify(jsonValue) : JSON.stringify(jsonValue, null, 2));
     return;
   }
   if (human !== undefined) console.log(human);

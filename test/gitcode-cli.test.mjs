@@ -65,8 +65,8 @@ function tempEnv(extra = {}) {
 
 test("gc help/version and JSON errors are stable", async () => {
   const help = await run(["repo", "--help"]);
-  assert.equal(help.code, 1);
-  assert.match(help.stderr, /Usage: gc repo/);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /GitCode CLI/);
 
   const version = await run(["--version"]);
   assert.equal(version.code, 0);
@@ -188,6 +188,9 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
 
     const list = await run(["pr", "list", "-R", "gcw_CSGJYRfL/test", "--json", "number,title", "--jq", ".[0].title"], { env, cwd });
     assert.equal(JSON.parse(list.stdout), "pr");
+
+    const missing = await run(["pr", "list", "-R", "gcw_CSGJYRfL/test", "--json", "number,title", "--jq", ".[1].title"], { env, cwd });
+    assert.equal(JSON.parse(missing.stdout), null);
 
     const templated = await run(["pr", "list", "-R", "gcw_CSGJYRfL/test", "--template", "{{range .}}#{{.number}} {{.title}}\n{{end}}"], { env, cwd });
     assert.equal(templated.stdout.trim(), "#3 pr");
