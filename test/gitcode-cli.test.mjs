@@ -66,7 +66,7 @@ function tempEnv(extra = {}) {
 test("gc help/version and JSON errors are stable", async () => {
   const help = await run(["repo", "--help"]);
   assert.equal(help.code, 0);
-  assert.match(help.stdout, /GitCode CLI/);
+  assert.match(help.stdout, /Usage: gc repo/);
 
   const version = await run(["--version"]);
   assert.equal(version.code, 0);
@@ -99,6 +99,8 @@ test("gc api resolves paths, sends auth, bodies, and paginates", async () => {
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues" && req.search.get("page") === "2") return { body: [] };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues") return { body: [{ number: 1, title: "one" }] };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/pulls") return { body: { ok: true, title: req.body.title } };
+    if (req.path === "/api/v5/needs-token" && req.search.get("access_token") === "secret") return { body: { ok: true } };
+    if (req.path === "/api/v5/needs-token") return { status: 403, body: { message: "requires access_token" } };
     return { status: 404, body: { error: req.path } };
   }, async ({ base, requests }) => {
     const env = tempEnv({ GITCODE_API_BASE: base, GITCODE_TOKEN: "secret" });
@@ -109,12 +111,17 @@ test("gc api resolves paths, sends auth, bodies, and paginates", async () => {
 
     const post = await run(["api", "repos/gcw_CSGJYRfL/test/pulls", "-X", "POST", "-f", "title=hello"], { env });
     assert.equal(JSON.parse(post.stdout).title, "hello");
+
+    const fallback = await run(["api", "needs-token"], { env });
+    assert.equal(JSON.parse(fallback.stdout).ok, true);
   });
 });
 
 test("repo resolver, repo view, default repo, and clone work", async () => {
   await withServer((req) => {
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test") return { body: { name: "test", full_name: "gcw_CSGJYRfL/test", default_branch: "main" } };
+    if (req.path === "/api/v5/users/gcw_CSGJYRfL/repos") return { body: [{ name: "test", full_name: "gcw_CSGJYRfL/test" }] };
+    if (req.path === "/api/v5/user/repos" && req.method === "POST") return { body: { name: req.body.name, full_name: `me/${req.body.name}` } };
     return { status: 404, body: {} };
   }, async ({ base }) => {
     const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-repo-"));
@@ -134,6 +141,12 @@ test("repo resolver, repo view, default repo, and clone work", async () => {
     const clone = await run(["repo", "clone", "gcw_CSGJYRfL/test", "checkout", "--", "--depth", "1"], { env: { ...env, GITCODE_GIT_BIN: gitMock }, cwd });
     assert.equal(clone.code, 0);
     assert.match(await readFile(gitLog, "utf8"), /clone\nhttps:\/\/gitcode.com\/gcw_CSGJYRfL\/test.git\ncheckout\n--depth\n1/);
+
+    const repos = await run(["repo", "list", "gcw_CSGJYRfL", "--json", "fullName"], { env, cwd });
+    assert.deepEqual(JSON.parse(repos.stdout), [{ fullName: "gcw_CSGJYRfL/test" }]);
+
+    const created = await run(["repo", "create", "sandbox", "--private", "--json", "fullName"], { env: { ...env, GITCODE_TOKEN: "secret" }, cwd });
+    assert.deepEqual(JSON.parse(created.stdout), { fullName: "me/sandbox" });
   });
 });
 
@@ -216,17 +229,53 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
 test("label, release, search, and browse commands are wired", async () => {
   await withServer((req) => {
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/labels") return { body: [{ name: "bug", color: "ff0000" }] };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases" && req.method === "POST") return { body: { tag_name: req.body.tag_name, name: req.body.name, body: req.body.body } };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases") return { body: [{ tag_name: "v1.0.0", name: "one" }] };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases/v1.0.0") return { body: { tag_name: "v1.0.0", body: "notes" } };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases/v2.0.0" && req.method === "DELETE") return { body: {} };
     if (req.path === "/api/v5/search/repositories") return { body: { items: [{ full_name: "gcw_CSGJYRfL/test" }], q: req.search.get("q") } };
+    if (req.path === "/api/v5/search/issues") return { body: { items: [{ number: 7, title: "seeded issue" }], state: req.search.get("state") } };
     return { status: 404, body: { error: req.path } };
   }, async ({ base }) => {
-    const env = tempEnv({ GITCODE_API_BASE: base, GC_REPO: "gcw_CSGJYRfL/test" });
+    const env = tempEnv({ GITCODE_API_BASE: base, GC_REPO: "gcw_CSGJYRfL/test", GITCODE_TOKEN: "secret" });
     assert.equal(JSON.parse((await run(["label", "list", "--json", "name"], { env })).stdout)[0].name, "bug");
     assert.equal(JSON.parse((await run(["release", "list", "--json", "tagName"], { env })).stdout)[0].tagName, "v1.0.0");
     assert.match((await run(["release", "view", "v1.0.0"], { env })).stdout, /notes/);
-    assert.equal(JSON.parse((await run(["search", "repos", "hello"], { env })).stdout).q, "hello");
+    assert.equal(JSON.parse((await run(["release", "create", "v2.0.0", "--title", "two", "--notes", "notes", "--json", "tagName"], { env })).stdout).tagName, "v2.0.0");
+    assert.match((await run(["release", "delete", "v2.0.0"], { env })).stdout, /Deleted release/);
+    assert.equal(JSON.parse((await run(["search", "repos", "hello", "--json"], { env })).stdout)[0].fullName, "gcw_CSGJYRfL/test");
+    assert.equal(JSON.parse((await run(["search", "issues", "seeded", "--state", "open", "--json", "title"], { env })).stdout)[0].title, "seeded issue");
     assert.equal((await run(["browse", "issues/7"], { env })).stdout.trim(), "https://gitcode.com/gcw_CSGJYRfL/test/issues/7");
+    assert.equal((await run(["browse", "branch/main"], { env })).stdout.trim(), "https://gitcode.com/gcw_CSGJYRfL/test/tree/main");
+  });
+});
+
+test("config, aliases, completion, and extension hooks work", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues") return { body: [] };
+    return { status: 404, body: {} };
+  }, async ({ base }) => {
+    const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-config-"));
+    const env = tempEnv({ GITCODE_API_BASE: base, GC_REPO: "gcw_CSGJYRfL/test" });
+
+    const set = await run(["config", "set", "pager", "false"], { env, cwd });
+    assert.equal(set.code, 0);
+    const get = await run(["config", "get", "pager", "--json"], { env, cwd });
+    assert.equal(JSON.parse(get.stdout), false);
+
+    const alias = await run(["alias", "set", "bugs", "issue list --state open"], { env, cwd });
+    assert.equal(alias.code, 0);
+    const expanded = await run(["bugs", "--json"], { env, cwd });
+    assert.deepEqual(JSON.parse(expanded.stdout), []);
+
+    const completion = await run(["completion", "bash"], { env, cwd });
+    assert.match(completion.stdout, /complete -F _gc_completion/);
+
+    const extension = join(cwd, "gc-hello");
+    await writeFile(extension, "#!/bin/sh\necho extension:$1\n", "utf8");
+    await chmod(extension, 0o755);
+    const ext = await run(["hello", "world"], { env: { ...env, PATH: `${cwd}:${process.env.PATH}` }, cwd });
+    assert.equal(ext.stdout.trim(), "extension:world");
   });
 });
 
@@ -242,4 +291,22 @@ test("live GitCode smoke tests are opt-in and read-only", { skip: process.env.GI
   assert.equal(prs.code, 0);
   const releases = await run(["release", "list", "-R", "gcw_CSGJYRfL/test", "--json"], { env });
   assert.equal(releases.code, 0);
+});
+
+test("authenticated GitCode sandbox writes are opt-in and cleanup-oriented", { skip: process.env.GITCODE_LIVE_WRITES !== "1" }, async (t) => {
+  if (!(process.env.GITCODE_TOKEN || process.env.GC_TOKEN || process.env.GITCODE_ACCESS_TOKEN)) {
+    t.skip("GITCODE_LIVE_WRITES requires a GitCode token");
+    return;
+  }
+  const marker = `gc-cli-live-${Date.now()}`;
+  const env = tempEnv({ GITCODE_API_BASE: process.env.GITCODE_API_BASE ?? "https://api.gitcode.com/api/v5" });
+  const create = await run(["label", "create", marker, "-R", "gcw_CSGJYRfL/test", "--color", "336699", "--description", "temporary live test label"], { env });
+  if (create.code !== 0) {
+    t.skip(`GitCode label write endpoint unavailable or token lacks permission: ${create.stderr || create.stdout}`);
+    return;
+  }
+  const edit = await run(["label", "edit", marker, "-R", "gcw_CSGJYRfL/test", "--new-name", `${marker}-edited`, "--color", "669933"], { env });
+  assert.equal(edit.code, 0);
+  const remove = await run(["label", "delete", `${marker}-edited`, "-R", "gcw_CSGJYRfL/test"], { env });
+  assert.equal(remove.code, 0);
 });

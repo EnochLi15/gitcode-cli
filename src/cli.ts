@@ -43,7 +43,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === "design") return designCommand(args);
   if (command === "scaffold") return scaffoldCommand(args);
   if (command === "repl") return repl();
-  fail(`Unknown command: ${command}`);
+  return runGitCodeCli(argv);
 }
 
 async function analyzeCommand(args: string[]): Promise<void> {
