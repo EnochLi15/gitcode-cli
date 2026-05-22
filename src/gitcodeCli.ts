@@ -41,7 +41,7 @@ export async function runGitCodeCli(argv: string[]): Promise<void> {
   let command = args.shift();
   if (!command || command === "help" || ctx.web && command === "--help") return help();
   if (command === "--help" || command === "-h") return help();
-  if (command === "--version") return console.log("0.1.0");
+  if (command === "--version") return console.log("0.1.1");
   if (args.includes("--help") || args.includes("-h")) return help(command, args[0]);
 
   if (!commandNames.has(command)) {
@@ -678,7 +678,7 @@ async function apiRequest(path: string, options: RequestOptions): Promise<unknow
   const method = options.method ?? "GET";
   const headers: Record<string, string> = {
     "accept": "application/json",
-    "user-agent": "gitcode-cli/0.1"
+    "user-agent": "gitcode-cli/0.1.1"
   };
   if (auth.token) Object.assign(headers, authHeaders(auth.token));
   if (options.body !== undefined) headers["content-type"] = "application/json";
@@ -1173,7 +1173,7 @@ async function validateToken(host: string, token: string): Promise<void> {
   const url = new URL("user", base.endsWith("/") ? base : `${base}/`);
   const headers = authHeaders(token);
   headers.accept = "application/json";
-  headers["user-agent"] = "gitcode-cli/0.1";
+  headers["user-agent"] = "gitcode-cli/0.1.1";
   const response = await fetch(url, { method: "GET", headers });
   if (response.ok) return;
   const text = await response.text();

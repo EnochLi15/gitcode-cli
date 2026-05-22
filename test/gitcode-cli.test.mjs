@@ -82,7 +82,7 @@ test("gc help/version and JSON errors are stable", async () => {
 
   const version = await run(["--version"]);
   assert.equal(version.code, 0);
-  assert.match(version.stdout, /0\.1\.0/);
+  assert.match(version.stdout, /0\.1\.1/);
 
   const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-no-repo-"));
   const error = await run(["--json", "repo", "view"], { env: tempEnv({ GC_REPO: "" }), cwd });

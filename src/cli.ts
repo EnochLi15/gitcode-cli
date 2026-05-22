@@ -34,7 +34,7 @@ async function main(argv: string[]): Promise<void> {
     const flag = args.shift();
     if (flag === "--json") jsonOutput = true;
     else if (flag === "--help" || flag === "-h") return help();
-    else if (flag === "--version") return console.log("0.1.0");
+    else if (flag === "--version") return console.log("0.1.1");
     else fail(`Unknown option: ${flag}`);
   }
   const command = args.shift();

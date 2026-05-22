@@ -1,6 +1,6 @@
 {
   "name": "@plm-cac/gitcode-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript CLI-Anything inspired web-to-CLI analyzer and scaffold generator",
   "type": "module",
   "bin": {
