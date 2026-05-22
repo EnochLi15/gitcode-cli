@@ -1,5 +1,5 @@
 {
-  "name": "cli-anything-web2cli",
+  "name": "gitcode-gh-cli",
   "version": "0.1.0",
   "description": "TypeScript CLI-Anything inspired web-to-CLI analyzer and scaffold generator",
   "type": "module",
