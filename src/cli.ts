@@ -6,6 +6,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { analyzeTarget } from "./analyzer.js";
 import { renderDesign } from "./designer.js";
 import { scaffoldCli } from "./generator.js";
+import { emitGitCodeError, isGitCodeCommand, runGitCodeCli } from "./gitcodeCli.js";
 import { loadSpec, saveSpec } from "./spec.js";
 
 let jsonOutput = false;
@@ -27,6 +28,7 @@ function fail(message: string): never {
 }
 
 async function main(argv: string[]): Promise<void> {
+  if (isGitCodeCommand(argv)) return runGitCodeCli(argv);
   const args = [...argv];
   while (args[0]?.startsWith("--")) {
     const flag = args.shift();
@@ -89,15 +91,18 @@ function takeOption(args: string[], ...names: string[]): string | undefined {
 }
 
 function help(): void {
-  console.log(`cli-anything-web2cli
+  console.log(`gitcode-cli
 
-Commands:
+GitCode commands:
+  auth, api, repo, issue, pr, label, release, search, browse
+
+web2cli commands:
   analyze <url-or-local-web-project> [-o spec.json] [--name name]
   design <spec.json> [-o WEB2CLI.md]
   scaffold <spec.json> [-o generated-web-cli] [--package-name name]
   repl
 
-Global options:
+web2cli global options:
   --json
   --help
   --version
@@ -120,5 +125,7 @@ async function repl(): Promise<void> {
   rl.close();
 }
 
-main(process.argv.slice(2)).catch((error) => fail(error instanceof Error ? error.message : String(error)));
-
+main(process.argv.slice(2)).catch((error) => {
+  if (isGitCodeCommand(process.argv.slice(2))) emitGitCodeError(process.argv.slice(2), error);
+  fail(error instanceof Error ? error.message : String(error));
+});

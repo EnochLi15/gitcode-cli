@@ -4,7 +4,9 @@
   "description": "TypeScript CLI-Anything inspired web-to-CLI analyzer and scaffold generator",
   "type": "module",
   "bin": {
-    "cli-anything-web2cli": "./dist/cli.js"
+    "cli-anything-web2cli": "./dist/cli.js",
+    "gc": "./dist/cli.js",
+    "gitcode": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -23,4 +25,3 @@
     "typescript": "^5.9.3"
   }
 }
-
