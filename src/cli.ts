@@ -94,7 +94,8 @@ function help(): void {
   console.log(`gitcode-cli
 
 GitCode commands:
-  auth, api, repo, issue, pr, label, release, search, browse
+  auth, api, repo, issue, pr, file, org, ssh-key, workflow
+  label, release, search, browse, config, alias, completion
 
 web2cli commands:
   analyze <url-or-local-web-project> [-o spec.json] [--name name]

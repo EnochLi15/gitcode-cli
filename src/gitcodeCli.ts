@@ -2,12 +2,13 @@ import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
-import { stdin as input } from "node:process";
+import { stdin as input, stderr as errorOutput } from "node:process";
+import { completionCommand } from "./commands/completion.js";
 
 const defaultHost = "gitcode.com";
 const defaultApiBase = "https://api.gitcode.com/api/v5";
-const commandNames = new Set(["auth", "api", "repo", "issue", "pr", "label", "release", "search", "browse", "config", "alias", "completion"]);
-const nonJsonValues = new Set([...commandNames, "list", "view", "create", "edit", "delete", "close", "reopen", "comment", "merge", "checkout", "diff", "status", "clone", "set-default", "login", "logout", "token", "setup-git", "get", "set"]);
+const commandNames = new Set(["auth", "api", "repo", "issue", "pr", "file", "org", "ssh-key", "workflow", "label", "release", "search", "browse", "config", "alias", "completion"]);
+const nonJsonValues = new Set([...commandNames, "list", "view", "create", "edit", "delete", "close", "reopen", "comment", "merge", "checkout", "diff", "status", "clone", "set-default", "login", "logout", "token", "setup-git", "get", "set", "repos", "members", "add", "init", "push"]);
 
 interface GitCodeContext {
   repo?: string;
@@ -61,13 +62,17 @@ export async function runGitCodeCli(argv: string[]): Promise<void> {
     if (command === "repo") return repoCommand(ctx, args);
     if (command === "issue") return issueCommand(ctx, args);
     if (command === "pr") return prCommand(ctx, args);
+    if (command === "file") return fileCommand(ctx, args);
+    if (command === "org") return orgCommand(ctx, args);
+    if (command === "ssh-key") return sshKeyCommand(ctx, args);
+    if (command === "workflow") return workflowCommand(ctx, args);
     if (command === "label") return labelCommand(ctx, args);
     if (command === "release") return releaseCommand(ctx, args);
     if (command === "search") return searchCommand(ctx, args);
     if (command === "browse") return browseCommand(ctx, args);
     if (command === "config") return configCommand(ctx, args);
     if (command === "alias") return aliasCommand(ctx, args);
-    if (command === "completion") return completionCommand(args);
+    if (command === "completion") return completionCommand(args, commandNames);
     if (await runExtension(command, args)) return;
     throw new CliError(`Unknown command: ${command}. See 'gc --help' or create an external extension named gc-${command}.`);
   } catch (error) {
@@ -148,9 +153,9 @@ async function authCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
   const sub = args.shift();
   if (sub === "login") {
     const withToken = takeFlag(args, "--with-token");
-    if (!withToken) throw new CliError("Usage: gc auth login --with-token < token.txt");
-    const token = (await readStdin()).trim();
-    if (!token) throw new CliError("No token was provided on stdin");
+    const token = withToken ? (await readStdin()).trim() : await promptToken(ctx.hostname);
+    if (!token) throw new CliError(withToken ? "No token was provided on stdin" : "No token was entered");
+    await validateToken(ctx.hostname, token);
     await saveHostToken(ctx.hostname, token);
     return emit(ctx, { hostname: ctx.hostname, tokenSource: "store" }, `Logged in to ${ctx.hostname}`);
   }
@@ -430,6 +435,126 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
   throw new CliError("Usage: gc pr <list|view|create|checkout|diff|status|comment|review|merge|close|reopen>");
 }
 
+async function fileCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
+  const sub = args.shift();
+  const repo = await resolveRepo(ctx);
+  const ref = takeOption(args, "--ref", "--branch");
+  if (sub === "list") {
+    const path = args[0] && !args[0].startsWith("-") ? args.shift()! : "";
+    const entries = ensureArray(await apiRequest(fileApiPath(repo, path), { query: { ref } })).map((entry) => normalizeFileEntry(entry, repo));
+    return emit(ctx, entries, entries.length ? entries.map((entry) => `${entry.type}\t${entry.path}`).join("\n") : "No files found");
+  }
+  if (sub === "view") {
+    const path = needArg(args.shift(), "Usage: gc file view -R OWNER/REPO <path> [--ref REF]");
+    const data = normalizeFileEntry(await apiRequest(fileApiPath(repo, path), { query: { ref } }), repo);
+    if (data.type !== "file" && data.content === undefined) throw new CliError(`Path is not a readable file: ${path}`);
+    const content = fileContent(data);
+    return emit(ctx, { ...data, content }, content);
+  }
+  throw new CliError("Usage: gc file <list|view>");
+}
+
+async function orgCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
+  const sub = args.shift();
+  if (sub === "list") {
+    const orgs = ensureArray(await apiRequest("user/orgs", { requireAuth: true })).map(normalizeOrg);
+    return emit(ctx, orgs, orgs.length ? orgs.map((org) => `${org.login}\t${org.name ?? ""}`).join("\n") : "No organizations found");
+  }
+  const org = args[0] && !args[0].startsWith("-") ? args.shift()! : undefined;
+  if (sub === "view") {
+    const name = needArg(org, "Usage: gc org view ORG");
+    const data = normalizeOrg(await apiRequest(`orgs/${encodeURIComponent(name)}`, {}));
+    return emit(ctx, data, `${data.login}\t${data.name ?? ""}\n${data.description ?? ""}`.trim());
+  }
+  if (sub === "repos") {
+    const name = needArg(org, "Usage: gc org repos ORG");
+    const repos = ensureArray(await apiRequest(`orgs/${encodeURIComponent(name)}/repos`, { query: { per_page: Number(takeOption(args, "--limit") ?? "30") } })).map((repo) => normalizeRepo(repo, parseRepo(`${name}/${stringValue(asRecord(repo).name, "repo")}`, ctx.hostname)));
+    return emit(ctx, repos, repos.length ? repos.map((repo) => `${repo.fullName}\t${repo.description ?? ""}`).join("\n") : "No organization repositories found");
+  }
+  if (sub === "members") {
+    const name = needArg(org, "Usage: gc org members ORG");
+    const members = ensureArray(await apiRequest(`orgs/${encodeURIComponent(name)}/members`, { query: { per_page: Number(takeOption(args, "--limit") ?? "30") }, requireAuth: true })).map(normalizeUser);
+    return emit(ctx, members, members.length ? members.map((member) => `${member.login}\t${member.name ?? ""}`).join("\n") : "No organization members found");
+  }
+  throw new CliError("Usage: gc org <list|view|repos|members>");
+}
+
+async function sshKeyCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
+  const sub = args.shift();
+  if (sub === "list") {
+    const keys = ensureArray(await apiRequest("user/keys", { requireAuth: true })).map(normalizeSshKey);
+    return emit(ctx, keys, keys.length ? keys.map((key) => `${key.id}\t${key.title}`).join("\n") : "No SSH keys found");
+  }
+  if (sub === "add") {
+    const title = takeOption(args, "--title") ?? args.shift();
+    const key = takeOption(args, "--key") ?? await bodyFromFileAlias(args, "--key-file") ?? args.shift();
+    if (!title || !key) throw new CliError("Usage: gc ssh-key add --title TITLE --key KEY");
+    const data = normalizeSshKey(await apiRequest("user/keys", { method: "POST", body: { title, key: key.trim() }, requireAuth: true }));
+    return emit(ctx, data, `Added SSH key ${data.title}`);
+  }
+  if (sub === "delete") {
+    const id = needArg(args.shift(), "Usage: gc ssh-key delete KEY_ID");
+    await apiRequest(`user/keys/${encodeURIComponent(id)}`, { method: "DELETE", requireAuth: true });
+    return emit(ctx, { id }, `Deleted SSH key ${id}`);
+  }
+  throw new CliError("Usage: gc ssh-key <list|add|delete>");
+}
+
+async function workflowCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
+  const sub = args.shift();
+  if (sub === "init") return workflowInit(ctx, args);
+  if (sub === "push") return workflowPush(ctx, args);
+  if (sub === "diff") return workflowDiff(ctx, args);
+  throw new CliError("Usage: gc workflow <init|push|diff>");
+}
+
+async function workflowInit(ctx: GitCodeContext, args: string[]): Promise<void> {
+  const remote = takeOption(args, "--remote") ?? "origin";
+  const name = takeOption(args, "--name");
+  const description = takeOption(args, "--description");
+  const commitMessage = takeOption(args, "--commit-message");
+  const push = !takeFlag(args, "--no-push");
+  const upstream = !takeFlag(args, "--no-upstream");
+  const isPrivate = takeFlag(args, "--private");
+  const isPublic = takeFlag(args, "--public");
+  const target = takeOption(args, "-R", "--repo") ?? ctx.repo;
+  if (!await hasGitDirectory()) await runProcess(gitBin(), ["init"]);
+  const repo = target ? parseRepo(target, ctx.hostname) : await createWorkflowRepo(ctx, name ?? await currentDirectoryName(), description, isPrivate, isPublic);
+  if (!await gitRemoteExists(remote)) await runProcess(gitBin(), ["remote", "add", remote, cloneUrl(repo)]);
+  if (commitMessage) {
+    await runProcess(gitBin(), ["add", "-A"]);
+    await runProcess(gitBin(), ["commit", "-m", commitMessage]);
+  }
+  if (push) await pushCurrentBranch(remote, upstream, false);
+  return emit(ctx, { repo: `${repo.owner}/${repo.repo}`, remote, pushed: push }, `Initialized workflow for ${repo.owner}/${repo.repo}`);
+}
+
+async function workflowPush(ctx: GitCodeContext, args: string[]): Promise<void> {
+  const remote = takeOption(args, "--remote") ?? "origin";
+  const upstream = takeFlag(args, "--set-upstream") || takeFlag(args, "-u");
+  const force = takeFlag(args, "--force-with-lease") || takeFlag(args, "--force");
+  if (!await gitRemoteExists(remote)) throw new CliError(`No git remote named ${remote}. Run gc workflow init first or add a GitCode remote.`);
+  if (!await remoteLooksLikeGitCode(remote, ctx.hostname)) throw new CliError(`Remote ${remote} does not point at ${ctx.hostname}. Use --remote with a GitCode remote.`);
+  const status = await gitStatusPorcelain();
+  if (status) errorOutput.write("Warning: working tree has uncommitted changes; pushing committed changes only.\n");
+  await pushCurrentBranch(remote, upstream, force);
+  return emit(ctx, { remote, branch: await currentBranch(), uncommittedChanges: Boolean(status) }, `Pushed current branch to ${remote}`);
+}
+
+async function workflowDiff(_ctx: GitCodeContext, args: string[]): Promise<void> {
+  const nameOnly = takeFlag(args, "--name-only");
+  const staged = takeFlag(args, "--staged") || takeFlag(args, "--cached");
+  const local = takeFlag(args, "--local");
+  const range = takeOption(args, "--range");
+  const pr = takeOption(args, "--pr");
+  const diffArgs = ["diff", ...(nameOnly ? ["--name-only"] : [])];
+  if (staged) diffArgs.push("--cached");
+  else if (range) diffArgs.push(range);
+  else if (pr) diffArgs.push(`main...${pr}`);
+  else if (!local) diffArgs.push("HEAD");
+  await runProcess(gitBin(), diffArgs);
+}
+
 async function labelCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
   const sub = args.shift();
   const repo = await resolveRepo(ctx);
@@ -581,24 +706,6 @@ async function aliasCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
   throw new CliError("Usage: gc alias <set|list|delete>");
 }
 
-async function completionCommand(args: string[]): Promise<void> {
-  const shell = args.shift() ?? "bash";
-  const words = [...commandNames].sort().join(" ");
-  if (shell === "zsh") {
-    console.log(`#compdef gc gitcode\n_arguments '1: :(${words})'`);
-    return;
-  }
-  if (shell === "fish") {
-    console.log(`complete -c gc -f -a "${words}"\ncomplete -c gitcode -f -a "${words}"`);
-    return;
-  }
-  if (shell === "bash") {
-    console.log(`_gc_completion() { COMPREPLY=( $(compgen -W "${words}" -- "\${COMP_WORDS[COMP_CWORD]}") ); }\ncomplete -F _gc_completion gc gitcode`);
-    return;
-  }
-  throw new CliError("Usage: gc completion [bash|zsh|fish]");
-}
-
 async function runExtension(command: string, args: string[]): Promise<boolean> {
   const executable = await findExecutable(`gc-${command}`);
   if (!executable) return false;
@@ -619,14 +726,18 @@ async function apiRequest(path: string, options: RequestOptions): Promise<unknow
     "accept": "application/json",
     "user-agent": "gitcode-cli/0.1"
   };
-  if (auth.token) {
-    headers.authorization = `Bearer ${auth.token}`;
-    headers["PRIVATE-TOKEN"] = auth.token;
-  }
+  if (auth.token) Object.assign(headers, authHeaders(auth.token));
   if (options.body !== undefined) headers["content-type"] = "application/json";
   const init = { method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) };
   if (options.paginate) return paginate(url, init, auth.token);
   return requestOne(url, init, auth.token);
+}
+
+function authHeaders(token: string): Record<string, string> {
+  return {
+    authorization: `Bearer ${token}`,
+    "PRIVATE-TOKEN": token
+  };
 }
 
 async function requestOne(url: URL, init: RequestInit, token?: string): Promise<unknown> {
@@ -732,6 +843,11 @@ function repoApiPath(repo: RepoRef): string {
   return `repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}`;
 }
 
+function fileApiPath(repo: RepoRef, path: string): string {
+  const suffix = path ? `/${path.split("/").map(encodeURIComponent).join("/")}` : "";
+  return `${repoApiPath(repo)}/contents${suffix}`;
+}
+
 function repoWebUrl(repo: RepoRef): string {
   return `https://${repo.host}/${repo.owner}/${repo.repo}`;
 }
@@ -810,6 +926,62 @@ function normalizeRelease(raw: unknown): Record<string, unknown> {
   };
 }
 
+function normalizeFileEntry(raw: unknown, repo: RepoRef): Record<string, unknown> {
+  const item = asRecord(raw);
+  const path = stringValue(item.path ?? item.name, "");
+  return {
+    name: item.name ?? path.split("/").pop() ?? "",
+    path,
+    type: item.type ?? (item.content === undefined ? "dir" : "file"),
+    size: item.size,
+    sha: item.sha,
+    encoding: item.encoding,
+    content: item.content,
+    url: item.html_url ?? item.web_url ?? `${repoWebUrl(repo)}/blob/${path}`,
+    raw: item
+  };
+}
+
+function fileContent(file: Record<string, unknown>): string {
+  const raw = stringValue(file.content, "");
+  const encoding = stringValue(file.encoding, "");
+  const content = encoding === "base64" ? Buffer.from(raw.replace(/\s/g, ""), "base64").toString("utf8") : raw;
+  if (content.includes("\0")) throw new CliError(`Unsupported binary content: ${file.path}`);
+  return content;
+}
+
+function normalizeOrg(raw: unknown): Record<string, unknown> {
+  const item = asRecord(raw);
+  return {
+    login: item.login ?? item.path ?? item.username ?? item.name ?? "",
+    name: item.name ?? item.full_name ?? "",
+    description: item.description ?? "",
+    url: item.html_url ?? item.web_url ?? "",
+    raw: item
+  };
+}
+
+function normalizeUser(raw: unknown): Record<string, unknown> {
+  const item = asRecord(raw);
+  return {
+    login: item.login ?? item.username ?? item.name ?? "",
+    name: item.name ?? item.nickname ?? "",
+    url: item.html_url ?? item.web_url ?? "",
+    raw: item
+  };
+}
+
+function normalizeSshKey(raw: unknown): Record<string, unknown> {
+  const item = asRecord(raw);
+  return {
+    id: item.id ?? "",
+    title: item.title ?? "",
+    key: item.key ?? "",
+    createdAt: item.created_at ?? item.createdAt,
+    raw: item
+  };
+}
+
 function normalizeSearchResult(type: string, raw: unknown): unknown {
   const items = Array.isArray(raw) ? raw : ensureArray(asRecord(raw).items);
   if (!items.length) return raw;
@@ -882,8 +1054,33 @@ export function emitGitCodeError(argv: string[], error: unknown): never {
   const wantsJson = argv.includes("--json");
   const message = error instanceof Error ? error.message : String(error);
   if (wantsJson) console.log(JSON.stringify({ error: message }));
-  else console.error(`Error: ${message}`);
+  else console.error(`Error: ${humanErrorMessage(message)}`);
   process.exit(error instanceof CliError ? error.exitCode : 1);
+}
+
+function humanErrorMessage(message: string): string {
+  const lang = configuredLanguage();
+  const status = message.match(/GitCode API (\d+)/)?.[1];
+  if (lang === "zh") {
+    if (/Authentication required|Not logged in|No token found/.test(message)) return "需要登录。请运行 `gc auth login`，或设置 GITCODE_TOKEN。";
+    if (/token validation|Authentication failed/.test(message)) return "令牌验证失败。请确认令牌有效、包含 API 权限，然后重试。";
+    if (/Could not resolve repository/.test(message)) return "无法确定仓库。请传入 -R OWNER/REPO，或运行 `gc repo set-default OWNER/REPO`。";
+    if (/Invalid repository/.test(message)) return "仓库格式无效。请使用 OWNER/REPO 或 HOST/OWNER/REPO。";
+    if (status === "401" || status === "403") return "GitCode 拒绝了请求。请检查登录状态、令牌权限，或是否有访问该仓库的权限。";
+    if (status === "404") return "GitCode 未找到目标资源。请检查仓库、编号或路径是否正确。";
+    if (status === "429") return "GitCode API 请求过于频繁。请稍后重试，或使用已认证令牌提高限制。";
+    if (/fetch failed|ENOTFOUND|ECONNREFUSED|network/i.test(message)) return "无法连接 GitCode。请检查网络、代理或 GITCODE_API_BASE 设置。";
+  }
+  if (/Authentication required/.test(message)) return `${message} You can also run \`gc auth login\` for an interactive prompt.`;
+  if (status === "401" || status === "403") return `${message}\nCheck your token permissions with \`gc auth status\` or create a fresh GitCode token.`;
+  if (status === "404") return `${message}\nCheck the repository, object number, or file path.`;
+  if (status === "429") return `${message}\nWait and retry, or authenticate with a GitCode token.`;
+  return message;
+}
+
+function configuredLanguage(): "zh" | "en" {
+  const raw = process.env.GITCODE_LANG ?? process.env.GC_LANG ?? process.env.LC_ALL ?? process.env.LANG ?? "";
+  return /^zh/i.test(raw) ? "zh" : "en";
 }
 
 function selectFields(data: unknown, fields: string[]): unknown {
@@ -977,6 +1174,23 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+async function promptToken(host: string): Promise<string> {
+  errorOutput.write(`GitCode token for ${host}: `);
+  return (await readStdin()).trim();
+}
+
+async function validateToken(host: string, token: string): Promise<void> {
+  const base = process.env.GITCODE_API_BASE ?? defaultApiBase;
+  const url = new URL("user", base.endsWith("/") ? base : `${base}/`);
+  const headers = authHeaders(token);
+  headers.accept = "application/json";
+  headers["user-agent"] = "gitcode-cli/0.1";
+  const response = await fetch(url, { method: "GET", headers });
+  if (response.ok) return;
+  const text = await response.text();
+  throw new CliError(`Authentication failed for ${host}: token validation returned GitCode API ${response.status}${text ? `: ${sanitizeApiText(text)}` : ""}. Create a fresh token with API access and try again.`);
+}
+
 async function bodyFromArgs(args: string[]): Promise<string | undefined> {
   return takeOption(args, "--body") ?? await bodyFromFile(args);
 }
@@ -1002,6 +1216,42 @@ async function prDiffRange(repo: RepoRef, number: string): Promise<string> {
 
 async function currentBranch(): Promise<string> {
   return (await runProcess(gitBin(), ["branch", "--show-current"], { capture: true })).trim();
+}
+
+async function createWorkflowRepo(ctx: GitCodeContext, name: string, description: string | undefined, isPrivate: boolean, isPublic: boolean): Promise<RepoRef> {
+  const repo = normalizeRepo(await apiRequest("user/repos", {
+    method: "POST",
+    body: compact({ name, description, private: isPrivate ? true : isPublic ? false : undefined }),
+    requireAuth: true
+  }), parseRepo(`me/${name}`, ctx.hostname));
+  return parseRepo(stringValue(repo.fullName, `me/${name}`), ctx.hostname);
+}
+
+async function currentDirectoryName(): Promise<string> {
+  return process.cwd().split(/[\\/]/).filter(Boolean).pop() ?? "new-repo";
+}
+
+async function hasGitDirectory(): Promise<boolean> {
+  return access(".git").then(() => true).catch(() => false);
+}
+
+async function gitRemoteExists(remote: string): Promise<boolean> {
+  return runProcess(gitBin(), ["remote", "get-url", remote], { capture: true }).then(() => true).catch(() => false);
+}
+
+async function remoteLooksLikeGitCode(remote: string, host: string): Promise<boolean> {
+  const url = await runProcess(gitBin(), ["remote", "get-url", remote], { capture: true });
+  return url.includes(host);
+}
+
+async function gitStatusPorcelain(): Promise<string> {
+  return runProcess(gitBin(), ["status", "--porcelain"], { capture: true }).catch(() => "");
+}
+
+async function pushCurrentBranch(remote: string, upstream: boolean, force: boolean): Promise<void> {
+  const branch = await currentBranch();
+  if (!branch) throw new CliError("Could not determine the current branch");
+  await runProcess(gitBin(), ["push", ...(upstream ? ["--set-upstream"] : []), ...(force ? ["--force-with-lease"] : []), remote, branch]);
 }
 
 function takeOption(args: string[], ...names: string[]): string | undefined {
@@ -1176,18 +1426,22 @@ async function openUrl(url: string): Promise<void> {
 function help(command?: string, subcommand?: string): void {
   const topic = [command, subcommand].filter(Boolean).join(" ");
   const topics: Record<string, string> = {
-    auth: "Usage: gc auth <login|status|token|logout|setup-git>\n\nExamples:\n  gc auth login --with-token < token.txt\n  gc auth status --json",
+    auth: "Usage: gc auth <login|status|token|logout|setup-git>\n\nExamples:\n  gc auth login\n  gc auth login --with-token < token.txt\n  gc auth status --json",
     api: "Usage: gc api <path> [-X METHOD] [-f key=value] [-F key=@file] [--input file.json] [--paginate]\n\nExamples:\n  gc api repos/gcw_CSGJYRfL/test/issues\n  gc api -X POST repos/OWNER/REPO/issues -f title=hello",
     repo: "Usage: gc repo <list|view|clone|set-default|create|fork|sync>\n\nExamples:\n  gc repo view -R gcw_CSGJYRfL/test --json name,defaultBranchRef\n  gc repo clone gcw_CSGJYRfL/test -- --depth 1",
-    issue: "Usage: gc issue <list|view|create|edit|close|reopen|comment>\n\nExamples:\n  gc issue list -R OWNER/REPO --state open --label bug\n  gc issue create --title 'Bug' --body-file issue.md",
+    issue: "Usage: gc issue <list|view|create|edit|close|reopen|comment>\n\nExamples:\n  gc issue list -R OWNER/REPO --state open --json number,title --jq '.[0].title'\n  gc issue create --title 'Bug' --body-file issue.md",
     pr: "Usage: gc pr <list|view|create|checkout|diff|status|comment|review|merge|close|reopen>\n\nExamples:\n  gc pr list --state open --base main\n  gc pr merge 12 --squash --delete-branch",
+    file: "Usage: gc file <list|view>\n\nExamples:\n  gc file list -R OWNER/REPO src --json path,type\n  gc file view -R OWNER/REPO README.md --ref main",
+    org: "Usage: gc org <list|view|repos|members>\n\nExamples:\n  gc org list --json login,name\n  gc org repos my-org --json fullName",
+    "ssh-key": "Usage: gc ssh-key <list|add|delete>\n\nExamples:\n  gc ssh-key list --json id,title\n  gc ssh-key add --title laptop --key-file ~/.ssh/id_ed25519.pub",
+    workflow: "Usage: gc workflow <init|push|diff>\n\nExamples:\n  gc workflow init -R OWNER/REPO --commit-message 'Initial commit'\n  gc workflow push --set-upstream\n  gc workflow diff --staged --name-only",
     label: "Usage: gc label <list|create|edit|delete>",
     release: "Usage: gc release <list|view|create|delete>",
     search: "Usage: gc search <repos|issues|prs> QUERY [--state STATE] [--owner OWNER] [-R OWNER/REPO]",
-    browse: "Usage: gc browse [issues|issues/N|pulls/N|releases/TAG|tree/BRANCH|blob/BRANCH/PATH]",
-    config: "Usage: gc config <get|set|list>",
-    alias: "Usage: gc alias <set|list|delete>",
-    completion: "Usage: gc completion [bash|zsh|fish]"
+    browse: "Usage: gc browse [issues|issues/N|pulls/N|releases/TAG|tree/BRANCH|blob/BRANCH/PATH]\n\nExamples:\n  gc browse -R OWNER/REPO issues\n  gc browse pulls/12",
+    config: "Usage: gc config <get|set|list>\n\nExamples:\n  gc config set pager false\n  gc config get pager --json",
+    alias: "Usage: gc alias <set|list|delete>\n\nExamples:\n  gc alias set bugs 'issue list --state open --json number,title'\n  gc bugs --template '{{range .}}#{{.number}} {{.title}}{{end}}'",
+    completion: "Usage: gc completion [bash|zsh|fish]\n\nExamples:\n  gc completion zsh > ~/.zfunc/_gc"
   };
   if (topic && topics[topic]) {
     console.log(topics[topic]);
@@ -1206,6 +1460,10 @@ Commands:
   repo list|view|clone|set-default|create|fork|sync
   issue list|view|create|edit|close|reopen|comment
   pr list|view|create|checkout|diff|status|comment|review|merge|close|reopen
+  file list|view
+  org list|view|repos|members
+  ssh-key list|add|delete
+  workflow init|push|diff
   label list|create|edit|delete
   release list|view|create|delete
   search repos|issues|prs

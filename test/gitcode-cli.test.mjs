@@ -67,6 +67,11 @@ test("gc help/version and JSON errors are stable", async () => {
   const help = await run(["repo", "--help"]);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /Usage: gc repo/);
+  assert.match(help.stdout, /--json name,defaultBranchRef/);
+
+  const workflowHelp = await run(["workflow", "--help"]);
+  assert.equal(workflowHelp.code, 0);
+  assert.match(workflowHelp.stdout, /gc workflow push --set-upstream/);
 
   const version = await run(["--version"]);
   assert.equal(version.code, 0);
@@ -78,20 +83,47 @@ test("gc help/version and JSON errors are stable", async () => {
   assert.equal(JSON.parse(error.stdout).error.includes("Could not resolve repository"), true);
 });
 
-test("auth stores tokens and env tokens take precedence", async () => {
-  const env = tempEnv();
-  const login = await run(["auth", "login", "--with-token"], { env, input: "saved-token\n" });
-  assert.equal(login.code, 0);
-  assert.match(login.stdout, /Logged in/);
+test("auth validates interactive and stdin tokens, and env tokens take precedence", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/user" && req.headers.authorization === "Bearer saved-token") return { body: { login: "me" } };
+    if (req.path === "/api/v5/user" && req.headers.authorization === "Bearer interactive-token") return { body: { login: "me" } };
+    if (req.path === "/api/v5/user") return { status: 401, body: { message: "bad token" } };
+    return { status: 404, body: {} };
+  }, async ({ base }) => {
+    const env = tempEnv({ GITCODE_API_BASE: base });
+    const login = await run(["auth", "login", "--with-token"], { env, input: "saved-token\n" });
+    assert.equal(login.code, 0);
+    assert.match(login.stdout, /Logged in/);
 
-  const status = await run(["auth", "status", "--json"], { env });
-  assert.equal(JSON.parse(status.stdout).tokenSource, "store");
+    const status = await run(["auth", "status", "--json"], { env });
+    assert.equal(JSON.parse(status.stdout).tokenSource, "store");
 
-  const token = await run(["auth", "token"], { env: { ...env, GITCODE_TOKEN: "env-token" } });
-  assert.equal(token.stdout.trim(), "env-token");
+    const token = await run(["auth", "token"], { env: { ...env, GITCODE_TOKEN: "env-token" } });
+    assert.equal(token.stdout.trim(), "env-token");
 
-  const logout = await run(["auth", "logout"], { env });
-  assert.equal(logout.code, 0);
+    const interactiveEnv = tempEnv({ GITCODE_API_BASE: base });
+    const interactive = await run(["auth", "login"], { env: interactiveEnv, input: "interactive-token\n" });
+    assert.equal(interactive.code, 0);
+    assert.match(interactive.stderr, /GitCode token/);
+
+    const invalid = await run(["auth", "login", "--with-token"], { env: tempEnv({ GITCODE_API_BASE: base }), input: "bad-token\n" });
+    assert.equal(invalid.code, 1);
+    assert.match(invalid.stderr, /token validation/);
+
+    const logout = await run(["auth", "logout"], { env });
+    assert.equal(logout.code, 0);
+  });
+});
+
+test("human errors can be localized while JSON errors stay stable", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-locale-"));
+  const zh = await run(["repo", "view"], { env: tempEnv({ GC_REPO: "", GITCODE_LANG: "zh-CN" }), cwd });
+  assert.equal(zh.code, 1);
+  assert.match(zh.stderr, /无法确定仓库/);
+
+  const json = await run(["--json", "repo", "view"], { env: tempEnv({ GC_REPO: "", GITCODE_LANG: "zh-CN" }), cwd });
+  assert.equal(json.code, 1);
+  assert.match(JSON.parse(json.stdout).error, /Could not resolve repository/);
 });
 
 test("gc api resolves paths, sends auth, bodies, and paginates", async () => {
@@ -223,6 +255,85 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
     const checkout = await run(["pr", "checkout", "3", "-R", "gcw_CSGJYRfL/test"], { env, cwd });
     assert.equal(checkout.code, 0);
     assert.match(await readFile(gitLog, "utf8"), /fetch\norigin\nfeature:feature\ncheckout\nfeature/);
+  });
+});
+
+test("file browsing commands list, view, JSON, and missing file errors", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/contents/src") return { body: [{ name: "index.ts", path: "src/index.ts", type: "file", size: 12 }] };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/contents/README.md") return { body: { name: "README.md", path: "README.md", type: "file", encoding: "base64", content: Buffer.from("# Hello\n").toString("base64") } };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/contents/missing.md") return { status: 404, body: { message: "not found" } };
+    return { status: 404, body: { error: req.path } };
+  }, async ({ base }) => {
+    const env = tempEnv({ GITCODE_API_BASE: base, GC_REPO: "gcw_CSGJYRfL/test" });
+    const list = await run(["file", "list", "src", "--json", "path,type"], { env });
+    assert.deepEqual(JSON.parse(list.stdout), [{ path: "src/index.ts", type: "file" }]);
+
+    const view = await run(["file", "view", "README.md"], { env });
+    assert.equal(view.stdout, "# Hello\n\n");
+
+    const missing = await run(["file", "view", "missing.md"], { env });
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /Check the repository/);
+  });
+});
+
+test("org and ssh-key commands cover happy paths and permission failures", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/user/orgs") return { body: [{ login: "gcw_CSGJYRfL", name: "Org" }] };
+    if (req.path === "/api/v5/orgs/gcw_CSGJYRfL") return { body: { login: "gcw_CSGJYRfL", description: "demo" } };
+    if (req.path === "/api/v5/orgs/gcw_CSGJYRfL/repos") return { body: [{ name: "test", full_name: "gcw_CSGJYRfL/test" }] };
+    if (req.path === "/api/v5/orgs/gcw_CSGJYRfL/members") return { status: 403, body: { message: "forbidden" } };
+    if (req.path === "/api/v5/user/keys" && req.method === "GET") return { body: [{ id: 1, title: "laptop" }] };
+    if (req.path === "/api/v5/user/keys" && req.method === "POST") return { body: { id: 2, title: req.body.title, key: req.body.key } };
+    if (req.path === "/api/v5/user/keys/2" && req.method === "DELETE") return { body: {} };
+    return { status: 404, body: { error: req.path } };
+  }, async ({ base }) => {
+    const env = tempEnv({ GITCODE_API_BASE: base, GITCODE_TOKEN: "secret" });
+    assert.equal(JSON.parse((await run(["org", "list", "--json", "login"], { env })).stdout)[0].login, "gcw_CSGJYRfL");
+    assert.match((await run(["org", "view", "gcw_CSGJYRfL"], { env })).stdout, /demo/);
+    assert.equal(JSON.parse((await run(["org", "repos", "gcw_CSGJYRfL", "--json", "fullName"], { env })).stdout)[0].fullName, "gcw_CSGJYRfL/test");
+    const denied = await run(["org", "members", "gcw_CSGJYRfL"], { env });
+    assert.equal(denied.code, 1);
+    assert.match(denied.stderr, /Check your token permissions/);
+
+    assert.equal(JSON.parse((await run(["ssh-key", "list", "--json", "id,title"], { env })).stdout)[0].title, "laptop");
+    const added = await run(["ssh-key", "add", "--title", "desktop", "--key", "ssh-ed25519 AAA"], { env });
+    assert.match(added.stdout, /Added SSH key desktop/);
+    const deleted = await run(["ssh-key", "delete", "2"], { env });
+    assert.match(deleted.stdout, /Deleted SSH key 2/);
+  });
+});
+
+test("workflow helpers use mocked git and API behavior", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/user/repos" && req.method === "POST") return { body: { name: req.body.name, full_name: `me/${req.body.name}` } };
+    return { status: 404, body: { error: req.path } };
+  }, async ({ base }) => {
+    const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-workflow-"));
+    const gitLog = join(cwd, "git-args.txt");
+    const gitMock = join(cwd, "git-mock.sh");
+    await writeFile(gitMock, `#!/bin/sh
+printf '%s\\n' "$@" >> "${gitLog}"
+if [ "$1" = "remote" ] && [ "$2" = "get-url" ]; then
+  if [ "$3" = "origin" ] && [ -f "${join(cwd, "remote-added")}" ]; then echo "https://gitcode.com/me/demo.git"; exit 0; fi
+  exit 1
+fi
+if [ "$1" = "remote" ] && [ "$2" = "add" ]; then touch "${join(cwd, "remote-added")}"; fi
+if [ "$1" = "branch" ]; then echo main; fi
+if [ "$1" = "status" ]; then echo " M README.md"; fi
+`, "utf8");
+    await chmod(gitMock, 0o755);
+    const env = tempEnv({ GITCODE_API_BASE: base, GITCODE_TOKEN: "secret", GITCODE_GIT_BIN: gitMock });
+
+    const init = await run(["workflow", "init", "--name", "demo", "--commit-message", "Initial commit"], { env, cwd });
+    assert.equal(init.code, 0);
+    const push = await run(["workflow", "push", "--set-upstream"], { env, cwd });
+    assert.equal(push.code, 0);
+    assert.match(push.stderr, /uncommitted changes/);
+    const diff = await run(["workflow", "diff", "--staged", "--name-only"], { env, cwd });
+    assert.equal(diff.code, 0);
+    assert.match(await readFile(gitLog, "utf8"), /init[\s\S]*remote\nadd\norigin\nhttps:\/\/gitcode.com\/me\/demo.git[\s\S]*commit\n-m\nInitial commit[\s\S]*push\n--set-upstream\norigin\nmain[\s\S]*diff\n--name-only\n--cached/);
   });
 });
 
