@@ -42,7 +42,6 @@ class CliError extends Error {
 
 export async function runGitCodeCli(argv: string[]): Promise<void> {
   const { ctx, args } = parseGlobalArgs(argv);
-  if (ctx.json && ctx.template) throw new CliError("--template cannot be used with --json");
   if (!ctx.json && ctx.jq) throw new CliError("--jq requires --json");
 
   let command = args.shift();
@@ -53,7 +52,7 @@ export async function runGitCodeCli(argv: string[]): Promise<void> {
 
   if (!commandNames.has(command)) {
     const expansion = await readAlias(command);
-    if (expansion) return runGitCodeCli([...ctxArgs(ctx), ...shellWords(expansion), ...args]);
+    if (expansion) return runGitCodeCli([...ctxArgs(ctx), ...expandAlias(expansion, args)]);
   }
 
   try {
@@ -85,9 +84,9 @@ export function isGitCodeCommand(argv: string[]): boolean {
   const args = [...argv];
   while (args[0]?.startsWith("-")) {
     const flag = args.shift();
-    if (flag === "--json") {
+    if (flag === "--json" || flag?.startsWith("--json=")) {
       const next = args[0];
-      if (next && !next.startsWith("-") && !nonJsonValues.has(next)) args.shift();
+      if (flag === "--json" && next && !next.startsWith("-") && !nonJsonValues.has(next)) args.shift();
     } else if (takesValue(flag)) {
       args.shift();
     }
@@ -109,25 +108,46 @@ function parseGlobalArgs(argv: string[]): { ctx: GitCodeContext; args: string[] 
       args.splice(i, 2);
       continue;
     }
+    if (arg.startsWith("-R=") || arg.startsWith("--repo=")) {
+      ctx.repo = arg.slice(arg.indexOf("=") + 1);
+      args.splice(i, 1);
+      continue;
+    }
     if (arg === "--hostname") {
       ctx.hostname = needOptionValue(args, i, arg);
       args.splice(i, 2);
       continue;
     }
-    if (arg === "--json") {
+    if (arg.startsWith("--hostname=")) {
+      ctx.hostname = arg.slice("--hostname=".length);
+      args.splice(i, 1);
+      continue;
+    }
+    if (arg === "--json" || arg.startsWith("--json=")) {
       ctx.json = true;
-      const next = args[i + 1];
-      if (next && !next.startsWith("-") && !nonJsonValues.has(next)) {
-        ctx.jsonFields = next.split(",").map((field) => field.trim()).filter(Boolean);
-        args.splice(i, 2);
-      } else {
+      const inlineFields = arg.startsWith("--json=") ? arg.slice("--json=".length) : undefined;
+      if (inlineFields !== undefined) {
+        ctx.jsonFields = inlineFields.split(",").map((field) => field.trim()).filter(Boolean);
         args.splice(i, 1);
+      } else {
+        const next = args[i + 1];
+        if (next && !next.startsWith("-") && !nonJsonValues.has(next)) {
+          ctx.jsonFields = next.split(",").map((field) => field.trim()).filter(Boolean);
+          args.splice(i, 2);
+        } else {
+          args.splice(i, 1);
+        }
       }
       continue;
     }
-    if (arg === "--jq") {
+    if (arg === "--jq" || arg === "-q") {
       ctx.jq = needOptionValue(args, i, arg);
       args.splice(i, 2);
+      continue;
+    }
+    if (arg.startsWith("--jq=")) {
+      ctx.jq = arg.slice("--jq=".length);
+      args.splice(i, 1);
       continue;
     }
     if (arg === "--template") {
@@ -135,7 +155,12 @@ function parseGlobalArgs(argv: string[]): { ctx: GitCodeContext; args: string[] 
       args.splice(i, 2);
       continue;
     }
-    if (arg === "--web") {
+    if (arg.startsWith("--template=")) {
+      ctx.template = arg.slice("--template=".length);
+      args.splice(i, 1);
+      continue;
+    }
+    if (arg === "--web" || arg === "-w") {
       ctx.web = true;
       args.splice(i, 1);
       continue;
@@ -146,7 +171,7 @@ function parseGlobalArgs(argv: string[]): { ctx: GitCodeContext; args: string[] 
 }
 
 function takesValue(flag: string | undefined): boolean {
-  return flag === "-R" || flag === "--repo" || flag === "--hostname" || flag === "--json" || flag === "--jq" || flag === "--template";
+  return flag === "-R" || flag === "--repo" || flag === "--hostname" || flag === "--json" || flag === "--jq" || flag === "-q" || flag === "--template";
 }
 
 async function authCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
@@ -295,10 +320,10 @@ async function issueCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
   if (sub === "list") {
     const repo = await resolveRepo(ctx);
     const query = {
-      state: takeOption(args, "--state") ?? "open",
-      labels: takeOption(args, "--label"),
-      assignee: takeOption(args, "--assignee"),
-      per_page: Number(takeOption(args, "--limit") ?? "30")
+      state: takeOption(args, "--state", "-s") ?? "open",
+      labels: takeOption(args, "--label", "-l"),
+      assignee: takeOption(args, "--assignee", "-a"),
+      per_page: Number(takeOption(args, "--limit", "-L") ?? "30")
     };
     const issues = ensureArray(await apiRequest(`${repoApiPath(repo)}/issues`, { query })).map((issue) => normalizeIssue(issue, repo));
     return emit(ctx, issues, issueListHuman(issues, repo));
@@ -307,18 +332,18 @@ async function issueCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
     const repo = await resolveRepo(ctx);
     const number = objectNumber(needArg(args.shift(), "Usage: gc issue view NUMBER [--comments] [--web]"));
     if (ctx.web) return openUrl(`${repoWebUrl(repo)}/issues/${number}`);
-    const withComments = takeFlag(args, "--comments");
+    const withComments = takeFlag(args, "--comments", "-c");
     const issue = normalizeIssue(await apiRequest(`${repoApiPath(repo)}/issues/${number}`, {}), repo);
     const data = { ...issue, comments: withComments ? await optionalArray(`${repoApiPath(repo)}/issues/${number}/comments`) : [], linkedPullRequests: (await optionalArray(`${repoApiPath(repo)}/issues/${number}/pull_requests`)).map((pr) => normalizePull(pr, repo)) };
     return emit(ctx, data, issueHuman(data));
   }
   if (sub === "create") {
     const repo = await resolveRepo(ctx);
-    const title = takeOption(args, "--title");
+    const title = takeOption(args, "--title", "-t");
     const body = await bodyFromArgs(args);
     if (!title) throw new CliError("Usage: gc issue create --title TEXT [--body TEXT|--body-file FILE]");
-    const labels = takeMany(args, "--label");
-    const assignees = takeMany(args, "--assignee");
+    const labels = takeMany(args, "--label", "-l");
+    const assignees = takeMany(args, "--assignee", "-a");
     const issue = normalizeIssue(await apiRequest(`${repoApiPath(repo)}/issues`, { method: "POST", body: compact({ title, body, labels, assignees }), requireAuth: true }), repo);
     return emit(ctx, issue, `Created issue #${issue.number}: ${issue.title}`);
   }
@@ -326,7 +351,7 @@ async function issueCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
     const repo = await resolveRepo(ctx);
     const number = objectNumber(needArg(args.shift(), `Usage: gc issue ${sub} NUMBER`));
     const body = sub === "edit"
-      ? compact({ title: takeOption(args, "--title"), body: await bodyFromArgs(args), labels: takeMany(args, "--add-label"), remove_labels: takeMany(args, "--remove-label"), assignees: takeMany(args, "--add-assignee"), remove_assignees: takeMany(args, "--remove-assignee") })
+      ? compact({ title: takeOption(args, "--title", "-t"), body: await bodyFromArgs(args), labels: takeMany(args, "--add-label"), remove_labels: takeMany(args, "--remove-label"), assignees: takeMany(args, "--add-assignee"), remove_assignees: takeMany(args, "--remove-assignee") })
       : { state: sub === "close" ? "close" : "reopen" };
     const issue = normalizeIssue(await apiRequest(`${repoApiPath(repo)}/issues/${number}`, { method: "PATCH", body, requireAuth: true }), repo);
     const comment = takeOption(args, "--comment");
@@ -336,7 +361,7 @@ async function issueCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
   if (sub === "comment") {
     const repo = await resolveRepo(ctx);
     const number = objectNumber(needArg(args.shift(), "Usage: gc issue comment NUMBER --body TEXT"));
-    const body = takeOption(args, "--body") ?? await bodyFromFile(args);
+    const body = takeOption(args, "--body", "-b") ?? await bodyFromFile(args);
     if (!body) throw new CliError("Usage: gc issue comment NUMBER --body TEXT");
     const comment = await apiRequest(`${repoApiPath(repo)}/issues/${number}/comments`, { method: "POST", body: { body }, requireAuth: true });
     return emit(ctx, comment, `Added comment to issue #${number}`);
@@ -349,10 +374,10 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
   if (sub === "list") {
     const repo = await resolveRepo(ctx);
     const query = {
-      state: takeOption(args, "--state") ?? "open",
-      base: takeOption(args, "--base"),
-      head: takeOption(args, "--head"),
-      per_page: Number(takeOption(args, "--limit") ?? "30")
+      state: takeOption(args, "--state", "-s") ?? "open",
+      base: takeOption(args, "--base", "-B"),
+      head: takeOption(args, "--head", "-H"),
+      per_page: Number(takeOption(args, "--limit", "-L") ?? "30")
     };
     const prs = ensureArray(await apiRequest(`${repoApiPath(repo)}/pulls`, { query })).map((pr) => normalizePull(pr, repo));
     return emit(ctx, prs, prListHuman(prs, repo));
@@ -361,17 +386,17 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
     const repo = await resolveRepo(ctx);
     const number = objectNumber(needArg(args.shift(), "Usage: gc pr view NUMBER [--comments] [--web]"));
     if (ctx.web) return openUrl(`${repoWebUrl(repo)}/pulls/${number}`);
-    const withComments = takeFlag(args, "--comments");
+    const withComments = takeFlag(args, "--comments", "-c");
     const pr = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls/${number}`, {}), repo);
     const data = { ...pr, comments: withComments ? await optionalArray(`${repoApiPath(repo)}/pulls/${number}/comments`) : [] };
     return emit(ctx, data, prHuman(data));
   }
   if (sub === "create") {
     const repo = await resolveRepo(ctx);
-    const title = takeOption(args, "--title");
+    const title = takeOption(args, "--title", "-t");
     const body = await bodyFromArgs(args);
-    const base = takeOption(args, "--base") ?? "main";
-    const head = takeOption(args, "--head") ?? await currentBranch();
+    const base = takeOption(args, "--base", "-B") ?? "main";
+    const head = takeOption(args, "--head", "-H") ?? await currentBranch();
     const draft = takeFlag(args, "--draft");
     if (!title) throw new CliError("Usage: gc pr create --title TEXT [--body TEXT] [--base BRANCH] [--head BRANCH]");
     const pr = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls`, { method: "POST", body: compact({ title, body, base, head, draft }), requireAuth: true }), repo);
@@ -380,7 +405,7 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
   if (sub === "comment" || sub === "review") {
     const repo = await resolveRepo(ctx);
     const number = objectNumber(needArg(args.shift(), `Usage: gc pr ${sub} NUMBER --body TEXT`));
-    const body = takeOption(args, "--body") ?? await bodyFromFile(args) ?? "";
+    const body = takeOption(args, "--body", "-b") ?? await bodyFromFile(args) ?? "";
     if (!body && sub === "comment") throw new CliError(`Usage: gc pr ${sub} NUMBER --body TEXT`);
     const endpoint = sub === "comment" ? "comments" : "reviews";
     const event = takeFlag(args, "--approve") ? "APPROVE" : takeFlag(args, "--request-changes") ? "REQUEST_CHANGES" : "COMMENT";
@@ -1071,12 +1096,12 @@ function searchHuman(type: string, raw: unknown): string {
 }
 
 function emit(ctx: GitCodeContext, data: unknown, human?: string): void {
-  if (ctx.template) {
-    console.log(renderTemplate(ctx.template, data));
-    return;
-  }
   const selected = ctx.jsonFields?.length ? selectFields(data, ctx.jsonFields) : data;
   const filtered = ctx.jq ? applyJq(selected, ctx.jq) : selected;
+  if (ctx.template) {
+    console.log(renderTemplate(ctx.template, filtered));
+    return;
+  }
   if (ctx.json || ctx.jq || ctx.jsonFields?.length) {
     const jsonValue = filtered === undefined ? null : filtered;
     console.log(typeof jsonValue === "string" ? JSON.stringify(jsonValue) : JSON.stringify(jsonValue, null, 2));
@@ -1088,7 +1113,7 @@ function emit(ctx: GitCodeContext, data: unknown, human?: string): void {
 }
 
 export function emitGitCodeError(argv: string[], error: unknown): never {
-  const wantsJson = argv.includes("--json");
+  const wantsJson = argv.some((arg) => arg === "--json" || arg.startsWith("--json="));
   const message = error instanceof Error ? error.message : String(error);
   if (wantsJson) console.log(JSON.stringify({ error: message }));
   else console.error(`Error: ${humanErrorMessage(message)}`);
@@ -1194,6 +1219,17 @@ function shellWords(input: string): string[] {
   return words.map((word) => word.replace(/^['"]|['"]$/g, "").replace(/\\"/g, "\"").replace(/\\'/g, "'"));
 }
 
+function expandAlias(expansion: string, args: string[]): string[] {
+  const words = shellWords(expansion);
+  let highestPlaceholder = 0;
+  const expanded = words.map((word) => word.replace(/\$(\d+)/g, (_match, indexText: string) => {
+    const index = Number(indexText);
+    highestPlaceholder = Math.max(highestPlaceholder, index);
+    return args[index - 1] ?? "";
+  })).filter((word) => word !== "");
+  return highestPlaceholder > 0 ? [...expanded, ...args.slice(highestPlaceholder)] : [...expanded, ...args];
+}
+
 function ctxArgs(ctx: GitCodeContext): string[] {
   return [
     ...(ctx.repo ? ["-R", ctx.repo] : []),
@@ -1229,17 +1265,19 @@ async function validateToken(host: string, token: string): Promise<void> {
 }
 
 async function bodyFromArgs(args: string[]): Promise<string | undefined> {
-  return takeOption(args, "--body") ?? await bodyFromFile(args);
+  return takeOption(args, "--body", "-b") ?? await bodyFromFile(args);
 }
 
 async function bodyFromFile(args: string[]): Promise<string | undefined> {
-  const file = takeOption(args, "--body-file");
-  return file ? readFile(file, "utf8") : undefined;
+  const file = takeOption(args, "--body-file", "-F");
+  if (!file) return undefined;
+  return file === "-" ? readStdin() : readFile(file, "utf8");
 }
 
 async function bodyFromFileAlias(args: string[], name: string): Promise<string | undefined> {
   const file = takeOption(args, name);
-  return file ? readFile(file, "utf8") : undefined;
+  if (!file) return undefined;
+  return file === "-" ? readStdin() : readFile(file, "utf8");
 }
 
 async function optionalArray(path: string): Promise<unknown[]> {
@@ -1324,33 +1362,45 @@ function takeOption(args: string[], ...names: string[]): string | undefined {
     const index = args.indexOf(name);
     if (index >= 0) {
       const value = args[index + 1];
-      if (!value || value.startsWith("-")) throw new CliError(`Missing value for ${name}`);
+      if (!value || value.startsWith("-") && value !== "-") throw new CliError(`Missing value for ${name}`);
       args.splice(index, 2);
+      return value;
+    }
+    const prefix = `${name}=`;
+    const inlineIndex = args.findIndex((arg) => arg.startsWith(prefix));
+    if (inlineIndex >= 0) {
+      const value = args[inlineIndex].slice(prefix.length);
+      if (!value) throw new CliError(`Missing value for ${name}`);
+      args.splice(inlineIndex, 1);
       return value;
     }
   }
   return undefined;
 }
 
-function takeMany(args: string[], name: string): string[] {
+function takeMany(args: string[], ...names: string[]): string[] {
   const values: string[] = [];
   for (;;) {
-    const value = takeOption(args, name);
+    const value = takeOption(args, ...names);
     if (!value) return values;
     values.push(value);
   }
 }
 
-function takeFlag(args: string[], name: string): boolean {
-  const index = args.indexOf(name);
-  if (index < 0) return false;
-  args.splice(index, 1);
-  return true;
+function takeFlag(args: string[], ...names: string[]): boolean {
+  for (const name of names) {
+    const index = args.indexOf(name);
+    if (index >= 0) {
+      args.splice(index, 1);
+      return true;
+    }
+  }
+  return false;
 }
 
 function needOptionValue(args: string[], index: number, name: string): string {
   const value = args[index + 1];
-  if (!value || value.startsWith("-")) throw new CliError(`Missing value for ${name}`);
+  if (!value || value.startsWith("-") && value !== "-") throw new CliError(`Missing value for ${name}`);
   return value;
 }
 

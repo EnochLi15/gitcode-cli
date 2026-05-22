@@ -266,6 +266,9 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
     const templated = await run(["pr", "list", "-R", "gcw_CSGJYRfL/test", "--template", "{{range .}}#{{.number}} {{.title}}\n{{end}}"], { env, cwd });
     assert.equal(templated.stdout.trim(), "#3 pr");
 
+    const templatedJsonFields = await run(["pr", "list", "-R=gcw_CSGJYRfL/test", "--json", "number,title", "--template", "{{range .}}#{{.number}} {{.title}}\n{{end}}"], { env, cwd });
+    assert.equal(templatedJsonFields.stdout.trim(), "#3 pr");
+
     const view = await run(["pr", "view", "3", "-R", "gcw_CSGJYRfL/test", "--comments", "--json", "comments"], { env, cwd });
     assert.equal(JSON.parse(view.stdout).comments[0].body, "hello");
 
@@ -409,6 +412,11 @@ test("config, aliases, completion, and extension hooks work", async () => {
     const expanded = await run(["bugs", "--json"], { env, cwd });
     assert.deepEqual(JSON.parse(expanded.stdout), []);
 
+    const placeholderAlias = await run(["alias", "set", "labeled", "issue list --label $1 --json number,title"], { env, cwd });
+    assert.equal(placeholderAlias.code, 0);
+    const placeholderExpanded = await run(["labeled", "bug"], { env, cwd });
+    assert.deepEqual(JSON.parse(placeholderExpanded.stdout), []);
+
     const completion = await run(["completion", "bash"], { env, cwd });
     assert.match(completion.stdout, /complete -F _gc_completion/);
 
@@ -417,6 +425,35 @@ test("config, aliases, completion, and extension hooks work", async () => {
     await chmod(extension, 0o755);
     const ext = await run(["hello", "world"], { env: { ...env, PATH: `${cwd}:${process.env.PATH}` }, cwd });
     assert.equal(ext.stdout.trim(), "extension:world");
+  });
+});
+
+test("gh-like option aliases and stdin body files are supported", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues" && req.method === "GET") {
+      assert.equal(req.search.get("state"), "open");
+      assert.equal(req.search.get("labels"), "bug");
+      assert.equal(req.search.get("per_page"), "5");
+      return { body: [{ number: 11, title: "short flags", state: "open" }] };
+    }
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues" && req.method === "POST") {
+      return { body: { number: 12, title: req.body.title, body: req.body.body, state: "open" } };
+    }
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/11") return { body: { number: 11, title: "short flags", state: "open" } };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/11/comments") return { body: [{ body: "note" }] };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/11/pull_requests") return { body: [] };
+    return { status: 404, body: { error: req.path } };
+  }, async ({ base, requests }) => {
+    const env = tempEnv({ GITCODE_API_BASE: base, GITCODE_TOKEN: "secret" });
+    const list = await run(["issue", "list", "-R=gcw_CSGJYRfL/test", "-s", "open", "-l=bug", "-L", "5", "--json=number,title", "-q", ".[0].title"], { env });
+    assert.equal(JSON.parse(list.stdout), "short flags");
+
+    const view = await run(["issue", "view", "11", "-R", "gcw_CSGJYRfL/test", "-c", "--json", "comments"], { env });
+    assert.equal(JSON.parse(view.stdout).comments[0].body, "note");
+
+    const created = await run(["issue", "create", "-R", "gcw_CSGJYRfL/test", "-t", "stdin body", "-F", "-"], { env, input: "from stdin\n" });
+    assert.match(created.stdout, /Created issue #12/);
+    assert.equal(requests.find((req) => req.method === "POST" && req.path.endsWith("/issues")).body.body, "from stdin\n");
   });
 });
 
