@@ -40,17 +40,27 @@ class GitCodeClient:
     def get(self, path: str, params: dict | None = None):
         return self.request("GET", path, params=params)
 
-    def post(self, path: str, data: dict | None = None, require_token: bool = True):
+    def post(self, path: str, data=None, require_token: bool = True):
         if require_token:
             self.require_token()
         return self.request("POST", path, data=data)
 
-    def patch(self, path: str, data: dict | None = None, require_token: bool = True):
+    def put(self, path: str, data=None, require_token: bool = True):
+        if require_token:
+            self.require_token()
+        return self.request("PUT", path, data=data)
+
+    def patch(self, path: str, data=None, require_token: bool = True):
         if require_token:
             self.require_token()
         return self.request("PATCH", path, data=data)
 
-    def request(self, method: str, path: str, params: dict | None = None, data: dict | None = None):
+    def delete(self, path: str, data=None, require_token: bool = True):
+        if require_token:
+            self.require_token()
+        return self.request("DELETE", path, data=data)
+
+    def request(self, method: str, path: str, params: dict | None = None, data=None):
         method = method.upper()
         url = self._url(path, params=params, include_token=method == "GET")
         headers = {
@@ -62,8 +72,11 @@ class GitCodeClient:
             headers["Authorization"] = f"Bearer {self.token}"
             headers["PRIVATE-TOKEN"] = self.token
         if data is not None:
-            payload = {k: v for k, v in data.items() if v is not None}
-            if self.token:
+            if isinstance(data, dict):
+                payload = {k: v for k, v in data.items() if v is not None}
+            else:
+                payload = data
+            if self.token and isinstance(payload, dict):
                 payload.setdefault("access_token", self.token)
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
