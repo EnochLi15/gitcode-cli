@@ -384,7 +384,7 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
     if (!body && sub === "comment") throw new CliError(`Usage: gc pr ${sub} NUMBER --body TEXT`);
     const endpoint = sub === "comment" ? "comments" : "reviews";
     const event = takeFlag(args, "--approve") ? "APPROVE" : takeFlag(args, "--request-changes") ? "REQUEST_CHANGES" : "COMMENT";
-    const data = await apiRequest(`${repoApiPath(repo)}/pulls/${number}/${endpoint}`, { method: "POST", body: sub === "review" ? { body, event } : { body }, requireAuth: true });
+    const data = await prDiscussionRequest(repo, number, endpoint, sub === "review" ? { body, event } : { body }, event);
     return emit(ctx, data, `${sub === "review" ? "Reviewed" : "Added comment to"} pull request #${number}`);
   }
   if (sub === "merge") {
@@ -392,7 +392,9 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
     const number = objectNumber(needArg(args.shift(), "Usage: gc pr merge NUMBER [--merge|--squash|--rebase] [--delete-branch]"));
     const method = takeFlag(args, "--squash") ? "squash" : takeFlag(args, "--rebase") ? "rebase" : "merge";
     const deleteBranch = takeFlag(args, "--delete-branch");
-    const pr = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls/${number}/merge`, { method: "PUT", body: { merge_method: method }, requireAuth: true }), repo);
+    const beforeMerge = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls/${number}`, {}), repo);
+    const merged = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls/${number}/merge`, { method: "PUT", body: { merge_method: method }, requireAuth: true }), repo);
+    const pr = { ...beforeMerge, ...merged, number: merged.number ?? beforeMerge.number ?? number, state: merged.state || "merged", headRefName: merged.headRefName || beforeMerge.headRefName, baseRefName: merged.baseRefName || beforeMerge.baseRefName };
     const headRef = stringValue(pr.headRefName, "");
     const baseRef = stringValue(pr.baseRefName, "");
     if (deleteBranch && headRef && headRef !== baseRef && headRef !== "main" && headRef !== "master") {
@@ -405,7 +407,10 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
     const number = objectNumber(needArg(args.shift(), `Usage: gc pr ${sub} NUMBER`));
     const pr = normalizePull(await apiRequest(`${repoApiPath(repo)}/pulls/${number}`, { method: "PATCH", body: { state: sub === "close" ? "closed" : "open", state_event: sub }, requireAuth: true }), repo);
     const comment = takeOption(args, "--comment");
-    if (comment) await apiRequest(`${repoApiPath(repo)}/pulls/${number}/comments`, { method: "POST", body: { body: comment }, requireAuth: true });
+    if (comment) {
+      await apiRequest(`${repoApiPath(repo)}/pulls/${number}/comments`, { method: "POST", body: { body: comment }, requireAuth: true })
+        .catch((error) => errorOutput.write(`Warning: pull request state changed, but adding the comment failed: ${error instanceof Error ? error.message : String(error)}\n`));
+    }
     return emit(ctx, pr, `${sub === "close" ? "Closed" : "Reopened"} pull request #${number}`);
   }
   if (sub === "checkout") {
@@ -457,7 +462,11 @@ async function fileCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
 async function orgCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
   const sub = args.shift();
   if (sub === "list") {
-    const orgs = ensureArray(await apiRequest("user/orgs", { requireAuth: true })).map(normalizeOrg);
+    const orgs = ensureArray(await apiRequest("user/orgs", { requireAuth: true }).catch(async (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/GitCode API 404/.test(message)) throw error;
+      return [await apiRequest("user", { requireAuth: true })];
+    })).map(normalizeOrg);
     return emit(ctx, orgs, orgs.length ? orgs.map((org) => `${org.login}\t${org.name ?? ""}`).join("\n") : "No organizations found");
   }
   const org = args[0] && !args[0].startsWith("-") ? args.shift()! : undefined;
@@ -615,7 +624,7 @@ async function releaseCommand(ctx: GitCodeContext, args: string[]): Promise<void
   }
   if (sub === "delete") {
     const tag = needArg(args.shift(), "Usage: gc release delete TAG");
-    await apiRequest(`${repoApiPath(repo)}/releases/${encodeURIComponent(tag)}`, { method: "DELETE", requireAuth: true });
+    await deleteRelease(repo, tag);
     return emit(ctx, { tagName: tag }, `Deleted release ${tag}`);
   }
   throw new CliError("Usage: gc release <list|view|create|delete>");
@@ -730,7 +739,7 @@ async function apiRequest(path: string, options: RequestOptions): Promise<unknow
   if (options.body !== undefined) headers["content-type"] = "application/json";
   const init = { method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) };
   if (options.paginate) return paginate(url, init, auth.token);
-  return requestOne(url, init, auth.token);
+  return requestOne(url, init, auth.token, options.body);
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -740,17 +749,44 @@ function authHeaders(token: string): Record<string, string> {
   };
 }
 
-async function requestOne(url: URL, init: RequestInit, token?: string): Promise<unknown> {
+async function requestOne(url: URL, init: RequestInit, token?: string, originalBody?: unknown, triedForm = false): Promise<unknown> {
   const response = await fetch(url, init);
   const text = await response.text();
   const data = parseResponseBody(text, response.headers.get("content-type"));
   if ((response.status === 401 || response.status === 403) && token && !url.searchParams.has("access_token")) {
     const retry = new URL(url);
     retry.searchParams.set("access_token", token);
-    return requestOne(retry, init);
+    return requestOne(retry, init, undefined, originalBody, triedForm);
+  }
+  if (response.status === 400 && !triedForm && canRetryAsForm(init, originalBody, text)) {
+    return requestOne(url, formRequest(init, originalBody), token, originalBody, true);
   }
   if (!response.ok) throw new CliError(`GitCode API ${response.status}: ${response.statusText}${text ? `: ${sanitizeApiText(text)}` : ""}`);
   return data;
+}
+
+function canRetryAsForm(init: RequestInit, body: unknown, text: string): boolean {
+  const method = String(init.method ?? "GET").toUpperCase();
+  return method !== "GET"
+    && body !== undefined
+    && !Array.isArray(body)
+    && typeof body === "object"
+    && /Required request parameter|Request body parsing error|content-type|parameter.+missing|are missing/i.test(text);
+}
+
+function formRequest(init: RequestInit, body: unknown): RequestInit {
+  const headers = { ...asRecord(init.headers) } as Record<string, string>;
+  headers["content-type"] = "application/x-www-form-urlencoded";
+  return { ...init, headers, body: formBody(body) };
+}
+
+function formBody(body: unknown): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(asRecord(body))) {
+    if (value === undefined) continue;
+    params.set(key, Array.isArray(value) ? value.join(",") : String(value));
+  }
+  return params.toString();
 }
 
 async function paginate(url: URL, init: RequestInit, token?: string): Promise<unknown[]> {
@@ -1207,6 +1243,31 @@ async function bodyFromFileAlias(args: string[], name: string): Promise<string |
 
 async function optionalArray(path: string): Promise<unknown[]> {
   return ensureArray(await apiRequest(path, {}).catch(() => []));
+}
+
+async function prDiscussionRequest(repo: RepoRef, number: string, endpoint: string, body: Record<string, unknown>, event: string): Promise<unknown> {
+  try {
+    return await apiRequest(`${repoApiPath(repo)}/pulls/${number}/${endpoint}`, { method: "POST", body, requireAuth: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (endpoint === "reviews" && event === "COMMENT" && /GitCode API 404/.test(message)) {
+      return apiRequest(`${repoApiPath(repo)}/pulls/${number}/comments`, { method: "POST", body: { body: body.body ?? "" }, requireAuth: true });
+    }
+    if (endpoint === "reviews" && /GitCode API 404/.test(message)) {
+      throw new CliError("GitCode does not expose approve/request-changes review actions for this repository. Use `gc pr comment` for discussion comments.");
+    }
+    throw error;
+  }
+}
+
+async function deleteRelease(repo: RepoRef, tag: string): Promise<void> {
+  try {
+    await apiRequest(`${repoApiPath(repo)}/releases/${encodeURIComponent(tag)}`, { method: "DELETE", requireAuth: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/GitCode API 405/.test(message)) throw error;
+    await apiRequest(`${repoApiPath(repo)}/tags/${encodeURIComponent(tag)}`, { method: "DELETE", requireAuth: true });
+  }
 }
 
 async function prDiffRange(repo: RepoRef, number: string): Promise<string> {

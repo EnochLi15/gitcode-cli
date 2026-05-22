@@ -35,7 +35,14 @@ async function withServer(handler, fn) {
     req.on("data", (chunk) => chunks.push(chunk));
     await new Promise((resolve) => req.on("end", resolve));
     const bodyText = Buffer.concat(chunks).toString("utf8");
-    const body = bodyText ? JSON.parse(bodyText) : undefined;
+    let body;
+    if (bodyText) {
+      try {
+        body = JSON.parse(bodyText);
+      } catch {
+        body = bodyText;
+      }
+    }
     const url = new URL(req.url, "http://127.0.0.1");
     const record = { method: req.method, path: url.pathname, search: url.searchParams, headers: req.headers, body };
     requests.push(record);
@@ -216,6 +223,22 @@ test("issue read and write workflows use normalized output and payloads", async 
   });
 });
 
+test("write requests retry as form data when GitCode rejects JSON bodies", async () => {
+  await withServer((req) => {
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/labels" && req.method === "POST") {
+      if ((req.headers["content-type"] ?? "").includes("application/json")) return { status: 400, body: { error_message: "the name, color are missing, at least one parameter must be provided" } };
+      return { body: { name: "live-e2e", color: "336699", description: "ok" } };
+    }
+    return { status: 404, body: { error: req.path } };
+  }, async ({ base, requests }) => {
+    const env = tempEnv({ GITCODE_API_BASE: base, GITCODE_TOKEN: "secret" });
+    const label = await run(["label", "create", "live-e2e", "--color", "336699", "--description", "ok", "-R", "gcw_CSGJYRfL/test", "--json", "name,color"], { env });
+    assert.deepEqual(JSON.parse(label.stdout), { name: "live-e2e", color: "336699" });
+    assert.equal(requests.length, 2);
+    assert.match(requests[1].headers["content-type"], /application\/x-www-form-urlencoded/);
+  });
+});
+
 test("pull request workflows cover read, write, merge, local git, jq, and templates", async () => {
   await withServer((req) => {
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/pulls" && req.method === "GET") return { body: [{ number: 3, title: "pr", state: "open", base: { ref: "main" }, head: { ref: "feature" } }] };
@@ -248,6 +271,9 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
 
     const create = await run(["pr", "create", "-R", "gcw_CSGJYRfL/test", "--title", "new", "--base", "main", "--head", "feature"], { env, cwd });
     assert.match(create.stdout, /Created pull request #4/);
+
+    const review = await run(["pr", "review", "3", "-R", "gcw_CSGJYRfL/test", "--body", "looks fine"], { env, cwd });
+    assert.match(review.stdout, /Reviewed pull request #3/);
 
     const merge = await run(["pr", "merge", "3", "-R", "gcw_CSGJYRfL/test", "--squash", "--delete-branch"], { env, cwd });
     assert.match(merge.stdout, /Merged pull request #3/);
@@ -343,7 +369,8 @@ test("label, release, search, and browse commands are wired", async () => {
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases" && req.method === "POST") return { body: { tag_name: req.body.tag_name, name: req.body.name, body: req.body.body } };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases") return { body: [{ tag_name: "v1.0.0", name: "one" }] };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases/v1.0.0") return { body: { tag_name: "v1.0.0", body: "notes" } };
-    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases/v2.0.0" && req.method === "DELETE") return { body: {} };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/releases/v2.0.0" && req.method === "DELETE") return { status: 405, body: { error_message: "Request method 'DELETE' not supported" } };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/tags/v2.0.0" && req.method === "DELETE") return { body: {} };
     if (req.path === "/api/v5/search/repositories") return { body: { items: [{ full_name: "gcw_CSGJYRfL/test" }], q: req.search.get("q") } };
     if (req.path === "/api/v5/search/issues") return { body: { items: [{ number: 7, title: "seeded issue" }], state: req.search.get("state") } };
     return { status: 404, body: { error: req.path } };
