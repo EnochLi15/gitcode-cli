@@ -148,7 +148,10 @@ test("issue read and write workflows use normalized output and payloads", async 
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/7/comments" && req.method === "GET") return { body: [{ body: "note" }] };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/7/pull_requests") return { body: [] };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues" && req.method === "POST") return { body: { number: 8, title: req.body.title, state: "open" } };
-    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/8" && req.method === "PATCH") return { body: { number: 8, title: "new", state: req.body.state } };
+    if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/8" && req.method === "PATCH") {
+      assert.equal(req.body.state, "close");
+      return { body: { number: 8, title: "new", state: "closed" } };
+    }
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/issues/8/comments" && req.method === "POST") return { body: { body: req.body.body } };
     return { status: 404, body: { error: req.path } };
   }, async ({ base, requests }) => {

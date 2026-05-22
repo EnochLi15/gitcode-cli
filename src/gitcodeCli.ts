@@ -276,7 +276,7 @@ async function issueCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
     const number = needArg(args.shift(), `Usage: gc issue ${sub} NUMBER`);
     const body = sub === "edit"
       ? compact({ title: takeOption(args, "--title"), body: await bodyFromArgs(args), labels: takeMany(args, "--add-label") })
-      : { state: sub === "close" ? "closed" : "open", state_event: sub === "close" ? "close" : "reopen" };
+      : { state: sub === "close" ? "close" : "reopen" };
     const issue = normalizeIssue(await apiRequest(`${repoApiPath(repo)}/issues/${number}`, { method: "PATCH", body, requireAuth: true }), repo);
     const comment = takeOption(args, "--comment");
     if (comment) await apiRequest(`${repoApiPath(repo)}/issues/${number}/comments`, { method: "POST", body: { body: comment }, requireAuth: true });
