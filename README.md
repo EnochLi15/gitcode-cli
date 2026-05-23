@@ -6,13 +6,33 @@
 
 面向工程师和 AI Agent 的 GitCode 自动化 CLI：用接近 GitHub CLI (`gh`) 的命令形态，把仓库、Issue、Pull Request、文件、Release、认证、JSON 输出和浏览器跳转变成稳定、可脚本化、适合 Agent 调用的工作流。
 
-[安装](#安装) · [认证](#认证) · [Agent Skill](#agent-skill) · [常用工作流](#常用工作流) · [测试](#测试) · [English](#english)
+[快速开始](#快速开始) · [安装](#安装) · [认证](#认证) · [Agent Skill](#agent-skill) · [常用工作流](#常用工作流) · [测试](#测试) · [English](#english)
 
-## 项目定位
+## 项目亮点
 
-`gitcode-cli` 是一个 scriptable、agent-ready 的 GitCode 命令行工具。它不是完整的 GitCode 桌面替代品，也不是 `toads/gitcode-cli` 的克隆；本项目更关注自动化场景里的稳定合同：熟悉的 `gh` 风格命令、可预测的 JSON 字段、低惊讶的变更操作，以及给 AI Agent 使用的安全默认值。
+- `gh` 风格命令：保留 GitHub CLI 用户熟悉的 repo、issue、pr、release、api 等操作心智。
+- Agent-ready：内置 companion skill，指导 Agent 使用稳定 JSON、显式仓库参数和安全确认流程。
+- 自动化优先：`--json`、`--jq`、`--template` 和 `gc api` 适合脚本、CI 和 Agent 推理。
+- 低惊讶写操作：merge、delete、release cleanup 等高风险操作在非交互环境中需要显式 `--yes`。
+- 本地 git 组合：clone、checkout、diff、push 等传输动作交给本机 `git`，平台对象通过 GitCode API 操作。
 
-`web2cli` harness 仍然随包保留，作为把 Web 应用分析并生成 Agent 友好 CLI 的次级能力；但 README 和日常使用主线聚焦在 GitCode CLI。
+## 快速开始
+
+### 让 Agent 自动安装
+
+如果你希望 Codex 或其他编码 Agent 自动安装本工具，可以直接把下面这段话发给 Agent：
+
+```text
+请在当前电脑/开发环境中安装并验证 gitcode-cli：
+1. 检查 Node.js 和 npm 是否可用，Node.js 需要 >= 20。
+2. 运行 `npm install -g @plm-cac/gitcode-cli`。
+3. 验证 `gc --version`、`gitcode --version` 和 `gc --help`。
+4. 运行 `gc skill status --json`，然后运行 `gc skill install --yes` 安装配套 Agent skill。
+5. 再次运行 `gc skill status --json` 汇报结果。
+6. 如果需要登录 GitCode，运行 `gc auth status` 检查状态；不要让我在聊天中粘贴 Token，请让我在本机交互输入或设置 `GITCODE_TOKEN`。
+```
+
+也可以把完整安装文档发给 Agent：[Agent install prompt](docs/agent-install.md)。安装完成后，Agent 可以通过 `gc skill status --json` 判断 skill 是否已经就位，并优先使用 `--json` 输出、显式仓库参数和安全确认流程。
 
 ## 适合做什么
 
@@ -43,20 +63,6 @@ gitcode --version
 ```bash
 npm install -g @plm-cac/gitcode-cli
 gc --help
-```
-
-如果你希望 Codex 或其他支持 filesystem skill 的 Agent 更稳定地使用这个 CLI，可以在 CLI 可用后安装配套 skill：
-
-```bash
-gc skill status
-gc skill install
-```
-
-非交互 Agent 会话应先检查状态、向用户确认，再执行安装：
-
-```bash
-gc skill status --json
-gc skill install --yes
 ```
 
 ## 认证
@@ -190,18 +196,6 @@ GitCode 当前 Release API 没有 release-only 删除端点。`gc release delete
 - [`gh` compatibility matrix](docs/gh-compatibility-matrix.md)
 - [GitCode CLI compatibility boundary](docs/gh-compatibility-boundary.md)
 
-## web2cli Harness
-
-原始 Web-to-CLI 工具仍然通过 `cli-anything-web2cli` 提供：
-
-```bash
-cli-anything-web2cli analyze ./my-web-app -o web2cli-spec.json
-cli-anything-web2cli design web2cli-spec.json -o WEB2CLI.md
-cli-anything-web2cli scaffold web2cli-spec.json -o generated-web-cli
-```
-
-它接受本地 Web 项目目录或 HTTP(S) URL。分析器会提取路由、API endpoint 线索、HTML 表单、package scripts、框架信号和 OpenAPI 文件。脚手架会把 spec 转换成一个小型 Node CLI 包，提供 JSON 输出、请求辅助函数、表单清单、endpoint 清单和交互式 REPL。
-
 ## 测试
 
 默认测试会构建 TypeScript 项目并使用 mock HTTP server，不会修改真实 GitCode 数据：
@@ -251,13 +245,33 @@ GITCODE_LIVE_REPO_CREATE=1 GITCODE_TOKEN=... npm run test:e2e:live-repo
 
 `gitcode-cli` is an automation-focused GitCode CLI for engineers and AI agents. It uses a GitHub CLI (`gh`)-like command shape to make repositories, issues, pull requests, files, releases, auth, JSON output, and browser handoff predictable from terminals, scripts, CI, and agent workflows.
 
-[Install](#install) · [Authenticate](#authenticate) · [Agent Skill](#agent-skill-1) · [Daily Workflows](#daily-workflows) · [Testing](#testing) · [Back to Chinese](#gitcode-cli)
+[Quick Start](#quick-start) · [Install](#install) · [Authenticate](#authenticate) · [Agent Skill](#agent-skill-1) · [Daily Workflows](#daily-workflows) · [Testing](#testing) · [Back to Chinese](#gitcode-cli)
 
-## Positioning
+## Highlights
 
-`gitcode-cli` is a scriptable, agent-ready GitCode command line tool. It is intentionally not a broad GitCode desktop replacement or a clone of `toads/gitcode-cli`; this project optimizes for stable automation contracts: familiar `gh`-style commands, predictable JSON fields, low-surprise mutation flows, and safe defaults for AI agents.
+- `gh`-style commands: keep the familiar repo, issue, pr, release, and api mental model for GitHub CLI users.
+- Agent-ready: ships a companion skill that guides agents toward stable JSON, explicit repository arguments, and safety checks.
+- Automation-first: `--json`, `--jq`, `--template`, and `gc api` work well for scripts, CI, and agent reasoning.
+- Low-surprise writes: high-risk operations such as merge, delete, and release cleanup require explicit `--yes` in non-interactive sessions.
+- Composes with local git: transport actions such as clone, checkout, diff, and push use local `git`; platform objects go through the GitCode API.
 
-The `web2cli` harness remains in the package as a secondary capability for analyzing web apps and generating agent-friendly CLIs, but the README and daily workflow surface are centered on GitCode.
+## Quick Start
+
+### Agent-assisted Install
+
+If you want Codex or another coding agent to install this tool for you, paste this prompt into the agent:
+
+```text
+Please install and verify gitcode-cli in the current machine/development environment:
+1. Check that Node.js and npm are available. Node.js must be >= 20.
+2. Run `npm install -g @plm-cac/gitcode-cli`.
+3. Verify `gc --version`, `gitcode --version`, and `gc --help`.
+4. Run `gc skill status --json`, then run `gc skill install --yes` to install the companion Agent skill.
+5. Run `gc skill status --json` again and report the result.
+6. If GitCode login is needed, run `gc auth status`; do not ask me to paste a token into chat. Ask me to enter it interactively on my machine or set `GITCODE_TOKEN`.
+```
+
+You can also send the full install document to the agent: [Agent install prompt](docs/agent-install.md). After installation, agents can use `gc skill status --json` to verify the skill is ready, then prefer `--json` output, explicit repository arguments, and confirmation-aware mutation flows.
 
 ## What It Automates
 
@@ -288,20 +302,6 @@ From a published package:
 ```bash
 npm install -g @plm-cac/gitcode-cli
 gc --help
-```
-
-For Codex or other filesystem-skill aware agents, install the companion skill after the CLI is available:
-
-```bash
-gc skill status
-gc skill install
-```
-
-Non-interactive agent sessions should inspect first, ask the user for confirmation, then run:
-
-```bash
-gc skill status --json
-gc skill install --yes
 ```
 
 ## Authenticate
@@ -434,18 +434,6 @@ See:
 
 - [`gh` compatibility matrix](docs/gh-compatibility-matrix.md)
 - [GitCode CLI compatibility boundary](docs/gh-compatibility-boundary.md)
-
-## web2cli Harness
-
-The original web-to-CLI tool is still available as `cli-anything-web2cli`:
-
-```bash
-cli-anything-web2cli analyze ./my-web-app -o web2cli-spec.json
-cli-anything-web2cli design web2cli-spec.json -o WEB2CLI.md
-cli-anything-web2cli scaffold web2cli-spec.json -o generated-web-cli
-```
-
-It accepts either a local web project directory or an HTTP(S) URL. The analyzer extracts routes, API endpoint hints, HTML forms, package scripts, framework signals, and OpenAPI files. The scaffolder turns that spec into a small Node CLI package with JSON output, request helpers, form inventory, endpoint inventory, and an interactive REPL.
 
 ## Testing
 
