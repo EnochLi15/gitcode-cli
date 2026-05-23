@@ -18,6 +18,8 @@ should move completed bullets under a version heading with the release date.
 - Added product-grade help examples for core GitCode commands.
 - Added a `gh` compatibility matrix and first-class `skills/gitcode-cli`
   guidance for agents.
+- Added `gc skill status` and `gc skill install` to help users install the
+  companion agent skill after installing the CLI.
 - Extracted completion command handling into a command module to establish the
   incremental command-module pattern.
 - Hardened live GitCode API behavior for form-encoded writes, PR review

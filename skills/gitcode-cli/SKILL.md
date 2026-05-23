@@ -9,6 +9,30 @@ Use `gc` or `gitcode` when the user wants to inspect or change GitCode state
 from the terminal. Prefer read-only commands first, stable `--json` fields for
 machine reasoning, and explicit confirmation before destructive operations.
 
+## Prerequisite
+
+This skill requires the `gitcode-cli` package, which provides the `gc` and
+`gitcode` commands. Before running GitCode commands, check:
+
+```bash
+command -v gc || command -v gitcode
+```
+
+If neither command exists, ask the user to install the CLI first:
+
+```bash
+npm install -g @plm-cac/gitcode-cli
+gc auth login
+```
+
+If the CLI exists but this skill is not installed in the user's agent
+environment, inspect and install it only after confirmation:
+
+```bash
+gc skill status --json
+gc skill install --yes
+```
+
 ## Quick Reference
 
 ```bash
@@ -58,7 +82,12 @@ gc workflow push --set-upstream
 ## Installation Note
 
 This skill is packaged under `skills/gitcode-cli/SKILL.md`. Agent environments
-that support filesystem skills can reference this file in place, or copy the
-`skills/gitcode-cli` directory into their configured skills directory. Keep the
-skill versioned with the CLI so command examples stay aligned with tests and
-README documentation.
+that support filesystem skills can reference this file in place, or install it
+through the CLI:
+
+```bash
+gc skill install
+```
+
+Keep the skill versioned with the CLI so command examples stay aligned with
+tests and README documentation.

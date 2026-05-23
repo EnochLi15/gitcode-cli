@@ -1,7 +1,7 @@
 {
   "name": "@plm-cac/gitcode-cli",
-  "version": "0.1.1",
-  "description": "TypeScript CLI-Anything inspired web-to-CLI analyzer and scaffold generator",
+  "version": "1.0.0",
+  "description": "Agent-ready GitCode CLI with gh-like repository, issue, pull request, auth, and JSON workflows",
   "type": "module",
   "bin": {
     "cli-anything-web2cli": "dist/cli.js",

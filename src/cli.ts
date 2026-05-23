@@ -34,7 +34,7 @@ async function main(argv: string[]): Promise<void> {
     const flag = args.shift();
     if (flag === "--json") jsonOutput = true;
     else if (flag === "--help" || flag === "-h") return help();
-    else if (flag === "--version") return console.log("0.1.1");
+    else if (flag === "--version") return console.log("1.0.0");
     else fail(`Unknown option: ${flag}`);
   }
   const command = args.shift();
@@ -95,7 +95,9 @@ function help(): void {
 
 GitCode commands:
   auth, api, repo, issue, pr, file, org, ssh-key, workflow
-  label, release, search, browse, config, alias, completion
+  label, release, search, browse, config, alias, completion, skill
+
+Agent support: run \`gc skill status\` or \`gc skill install\` to enable Codex/agent guidance.
 
 web2cli commands:
   analyze <url-or-local-web-project> [-o spec.json] [--name name]

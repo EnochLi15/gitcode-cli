@@ -71,10 +71,18 @@ function tempEnv(extra = {}) {
 }
 
 test("gc help/version and JSON errors are stable", async () => {
+  const rootHelp = await run(["--help"]);
+  assert.equal(rootHelp.code, 0);
+  assert.match(rootHelp.stdout, /Agent support: run `gc skill status` or `gc skill install`/);
+
   const help = await run(["repo", "--help"]);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /Usage: gc repo/);
   assert.match(help.stdout, /--json name,defaultBranchRef/);
+
+  const skillHelp = await run(["skill", "--help"]);
+  assert.equal(skillHelp.code, 0);
+  assert.match(skillHelp.stdout, /Usage: gc skill <status\|install>/);
 
   const workflowHelp = await run(["workflow", "--help"]);
   assert.equal(workflowHelp.code, 0);
@@ -82,7 +90,7 @@ test("gc help/version and JSON errors are stable", async () => {
 
   const version = await run(["--version"]);
   assert.equal(version.code, 0);
-  assert.match(version.stdout, /0\.1\.1/);
+  assert.match(version.stdout, /1\.0\.0/);
 
   const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-no-repo-"));
   const error = await run(["--json", "repo", "view"], { env: tempEnv({ GC_REPO: "" }), cwd });
@@ -101,6 +109,7 @@ test("auth validates interactive and stdin tokens, and env tokens take precedenc
     const login = await run(["auth", "login", "--with-token"], { env, input: "saved-token\n" });
     assert.equal(login.code, 0);
     assert.match(login.stdout, /Logged in/);
+    assert.match(login.stdout, /gc skill install/);
 
     const status = await run(["auth", "status", "--json"], { env });
     assert.equal(JSON.parse(status.stdout).tokenSource, "store");
@@ -455,6 +464,40 @@ test("config, aliases, completion, and extension hooks work", async () => {
     const ext = await run(["hello", "world"], { env: { ...env, PATH: `${cwd}:${process.env.PATH}` }, cwd });
     assert.equal(ext.stdout.trim(), "extension:world");
   });
+});
+
+test("skill status reports packaged and installed companion skill state", async () => {
+  const target = await mkdtemp(join(tmpdir(), "gitcode-cli-skill-target-"));
+  const env = tempEnv({ CODEX_HOME: target });
+
+  const status = await run(["skill", "status", "--json"], { env });
+  assert.equal(status.code, 0);
+  const data = JSON.parse(status.stdout);
+  assert.equal(data.cliInstalled, true);
+  assert.equal(data.skillPackaged, true);
+  assert.equal(data.skillInstalled, false);
+  assert.match(data.source, /skills\/gitcode-cli$/);
+  assert.equal(data.target, join(target, "skills", "gitcode-cli"));
+  assert.equal(data.installCommand, "gc skill install");
+});
+
+test("skill install copies the packaged companion skill after confirmation", async () => {
+  const target = await mkdtemp(join(tmpdir(), "gitcode-cli-skill-install-"));
+  const env = tempEnv({ CODEX_HOME: target });
+
+  const refused = await run(["skill", "install"], { env });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /without --yes/);
+
+  const install = await run(["skill", "install", "--yes"], { env });
+  assert.equal(install.code, 0);
+  assert.match(install.stdout, /Installed GitCode CLI companion skill/);
+
+  const installed = await readFile(join(target, "skills", "gitcode-cli", "SKILL.md"), "utf8");
+  assert.match(installed, /# GitCode CLI Skill/);
+
+  const status = await run(["skill", "status", "--json"], { env });
+  assert.equal(JSON.parse(status.stdout).skillInstalled, true);
 });
 
 test("gh-like option aliases and stdin body files are supported", async () => {

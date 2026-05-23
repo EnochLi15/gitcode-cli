@@ -1,14 +1,15 @@
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { stdin as input, stderr as errorOutput } from "node:process";
+import { fileURLToPath } from "node:url";
 import { completionCommand } from "./commands/completion.js";
 import { expandAlias, GitCodeContext, needOptionValue, parseGlobalArgs, takeFlag, takeMany, takeOption, takesValue } from "./gitcode/args.js";
 
 const defaultHost = "gitcode.com";
 const defaultApiBase = "https://api.gitcode.com/api/v5";
-const commandNames = new Set(["auth", "api", "repo", "issue", "pr", "file", "org", "ssh-key", "workflow", "label", "release", "search", "browse", "config", "alias", "completion"]);
+const commandNames = new Set(["auth", "api", "repo", "issue", "pr", "file", "org", "ssh-key", "workflow", "label", "release", "search", "browse", "config", "alias", "completion", "skill"]);
 const nonJsonValues = new Set([...commandNames, "list", "view", "create", "edit", "delete", "close", "reopen", "comment", "merge", "checkout", "diff", "status", "clone", "set-default", "login", "logout", "token", "setup-git", "get", "set", "repos", "members", "add", "init", "push"]);
 
 interface RepoRef {
@@ -41,7 +42,7 @@ export async function runGitCodeCli(argv: string[]): Promise<void> {
   let command = args.shift();
   if (!command || command === "help" || ctx.web && command === "--help") return help();
   if (command === "--help" || command === "-h") return help();
-  if (command === "--version") return console.log("0.1.1");
+  if (command === "--version") return console.log("1.0.0");
   if (args.includes("--help") || args.includes("-h")) return help(command, args[0]);
 
   if (!commandNames.has(command)) {
@@ -66,6 +67,7 @@ export async function runGitCodeCli(argv: string[]): Promise<void> {
     if (command === "config") return configCommand(ctx, args);
     if (command === "alias") return aliasCommand(ctx, args);
     if (command === "completion") return completionCommand(args, commandNames);
+    if (command === "skill") return skillCommand(ctx, args);
     if (await runExtension(command, args)) return;
     throw new CliError(`Unknown command: ${command}. See 'gc --help' or create an external extension named gc-${command}.`);
   } catch (error) {
@@ -96,7 +98,7 @@ async function authCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
     if (!token) throw new CliError(withToken ? "No token was provided on stdin" : "No token was entered");
     await validateToken(ctx.hostname, token);
     await saveHostToken(ctx.hostname, token);
-    return emit(ctx, { hostname: ctx.hostname, tokenSource: "store" }, `Logged in to ${ctx.hostname}`);
+    return emit(ctx, { hostname: ctx.hostname, tokenSource: "store" }, `Logged in to ${ctx.hostname}\nAgent support: run \`gc skill install\` to enable Codex/agent guidance.`);
   }
   if (sub === "status") {
     const auth = await getAuth(ctx.hostname);
@@ -659,11 +661,66 @@ async function aliasCommand(ctx: GitCodeContext, args: string[]): Promise<void> 
   throw new CliError("Usage: gc alias <set|list|delete>");
 }
 
+async function skillCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
+  const sub = args.shift();
+  if (sub === "status") {
+    const status = await skillStatus();
+    const human = [
+      `GitCode CLI: ${status.cliInstalled ? "installed" : "missing"}`,
+      `Companion skill: ${status.skillInstalled ? "installed" : "not installed"}`,
+      `Source: ${status.source}`,
+      `Target: ${status.target}`,
+      status.skillInstalled ? undefined : `Run: ${status.installCommand}`
+    ].filter(Boolean).join("\n");
+    return emit(ctx, status, human);
+  }
+  if (sub === "install") {
+    await confirmDestructive(args, `install the GitCode CLI companion skill into ${installedSkillDir()}`);
+    const status = await installSkill();
+    return emit(ctx, status, `Installed GitCode CLI companion skill to ${status.target}`);
+  }
+  throw new CliError("Usage: gc skill <status|install>");
+}
+
 async function runExtension(command: string, args: string[]): Promise<boolean> {
   const executable = await findExecutable(`gc-${command}`);
   if (!executable) return false;
   await runProcess(executable, args);
   return true;
+}
+
+async function skillStatus(): Promise<Record<string, unknown>> {
+  const source = packagedSkillDir();
+  const target = installedSkillDir();
+  return {
+    cliInstalled: true,
+    skillPackaged: await exists(join(source, "SKILL.md")),
+    skillInstalled: await exists(join(target, "SKILL.md")),
+    source,
+    target,
+    installCommand: "gc skill install"
+  };
+}
+
+async function installSkill(): Promise<Record<string, unknown>> {
+  const source = packagedSkillDir();
+  const target = installedSkillDir();
+  if (!await exists(join(source, "SKILL.md"))) throw new CliError(`Packaged GitCode CLI skill was not found at ${source}`);
+  await mkdir(dirname(target), { recursive: true });
+  await cp(source, target, { recursive: true, force: true });
+  return skillStatus();
+}
+
+function packagedSkillDir(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), "..", "skills", "gitcode-cli");
+}
+
+function installedSkillDir(): string {
+  return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "skills", "gitcode-cli");
+}
+
+async function exists(path: string): Promise<boolean> {
+  return access(path).then(() => true).catch(() => false);
 }
 
 async function apiRequest(path: string, options: RequestOptions): Promise<unknown> {
@@ -678,7 +735,7 @@ async function apiRequest(path: string, options: RequestOptions): Promise<unknow
   const method = options.method ?? "GET";
   const headers: Record<string, string> = {
     "accept": "application/json",
-    "user-agent": "gitcode-cli/0.1.1"
+    "user-agent": "gitcode-cli/1.0.0"
   };
   if (auth.token) Object.assign(headers, authHeaders(auth.token));
   if (options.body !== undefined) headers["content-type"] = "application/json";
@@ -1173,7 +1230,7 @@ async function validateToken(host: string, token: string): Promise<void> {
   const url = new URL("user", base.endsWith("/") ? base : `${base}/`);
   const headers = authHeaders(token);
   headers.accept = "application/json";
-  headers["user-agent"] = "gitcode-cli/0.1.1";
+  headers["user-agent"] = "gitcode-cli/1.0.0";
   const response = await fetch(url, { method: "GET", headers });
   if (response.ok) return;
   const text = await response.text();
@@ -1425,7 +1482,8 @@ function help(command?: string, subcommand?: string): void {
     browse: "Usage: gc browse [issues|issues/N|pulls/N|releases/TAG|tree/BRANCH|blob/BRANCH/PATH]\n\nExamples:\n  gc browse -R OWNER/REPO issues\n  gc browse pulls/12",
     config: "Usage: gc config <get|set|list>\n\nExamples:\n  gc config set pager false\n  gc config get pager --json",
     alias: "Usage: gc alias <set|list|delete>\n\nExamples:\n  gc alias set bugs 'issue list --state open --json number,title'\n  gc bugs --template '{{range .}}#{{.number}} {{.title}}{{end}}'",
-    completion: "Usage: gc completion [bash|zsh|fish]\n\nExamples:\n  gc completion zsh > ~/.zfunc/_gc"
+    completion: "Usage: gc completion [bash|zsh|fish]\n\nExamples:\n  gc completion zsh > ~/.zfunc/_gc",
+    skill: "Usage: gc skill <status|install>\n\nExamples:\n  gc skill status --json\n  gc skill install"
   };
   if (topic && topics[topic]) {
     console.log(topics[topic]);
@@ -1455,6 +1513,7 @@ Commands:
   config get|set|list
   alias set|list|delete
   completion [bash|zsh|fish]
+  skill status|install
 
 Global options:
   -R, --repo OWNER/REPO
@@ -1467,6 +1526,8 @@ Global options:
   --version
 
 Destructive operations such as pr merge, ssh-key delete, label delete, and release delete --cleanup-tag require --yes in non-interactive sessions.
+
+Agent support: run \`gc skill status\` or \`gc skill install\` to enable Codex/agent guidance.
 
 Unsupported GitHub-only commands fail with a clear error. External extensions named gc-<command> on PATH are executed for custom workflows.
 `);

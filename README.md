@@ -37,6 +37,22 @@ npm install -g @plm-cac/gitcode-cli
 gc --help
 ```
 
+For Codex or other filesystem-skill aware agents, install the companion skill
+after the CLI is available:
+
+```bash
+gc skill status
+gc skill install
+```
+
+Non-interactive agent sessions should inspect first, ask the user for
+confirmation, then run:
+
+```bash
+gc skill status --json
+gc skill install --yes
+```
+
 ## Authenticate
 
 Interactive login prompts on stderr and validates the token before saving it:
@@ -160,6 +176,17 @@ compact command reference, nudges them toward read-only and JSON-first flows,
 and documents when to prompt before mutating GitCode state. Published package
 metadata includes the `skills` directory so downstream agent environments can
 install or reference the same guidance.
+
+If the CLI is already installed, use the built-in installer:
+
+```bash
+gc skill status
+gc skill install
+```
+
+If the skill was installed first, it will instruct the agent to verify that
+`gc` or `gitcode` exists and ask the user to install `@plm-cac/gitcode-cli`
+before running GitCode commands.
 
 ## web2cli Harness
 
