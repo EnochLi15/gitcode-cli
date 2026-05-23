@@ -88,9 +88,16 @@ test("gc help/version and JSON errors are stable", async () => {
   assert.equal(workflowHelp.code, 0);
   assert.match(workflowHelp.stdout, /gc workflow push --set-upstream/);
 
+  const prReviewHelp = await run(["pr", "review", "--help"]);
+  assert.equal(prReviewHelp.code, 0);
+  assert.match(prReviewHelp.stdout, /Usage: gc pr review NUMBER/);
+  assert.match(prReviewHelp.stdout, /--body-file/);
+  assert.match(prReviewHelp.stdout, /--approve/);
+  assert.match(prReviewHelp.stdout, /--request-changes/);
+
   const version = await run(["--version"]);
   assert.equal(version.code, 0);
-  assert.match(version.stdout, /1\.0\.0/);
+  assert.match(version.stdout, /1\.0\.1/);
 
   const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-no-repo-"));
   const error = await run(["--json", "repo", "view"], { env: tempEnv({ GC_REPO: "" }), cwd });
@@ -275,7 +282,7 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/pulls/3/merge") return { body: { number: 3, title: "pr", state: "merged", head: { ref: "feature" } } };
     if (req.path === "/api/v5/repos/gcw_CSGJYRfL/test/branches/feature") return { body: {} };
     return { status: 404, body: { error: req.path } };
-  }, async ({ base }) => {
+  }, async ({ base, requests }) => {
     const cwd = await mkdtemp(join(tmpdir(), "gitcode-cli-pr-"));
     await mkdir(join(cwd, ".git"), { recursive: true });
     const gitLog = join(cwd, "git-args.txt");
@@ -283,6 +290,11 @@ test("pull request workflows cover read, write, merge, local git, jq, and templa
     await writeFile(gitMock, `#!/bin/sh\nprintf '%s\\n' "$@" >> "${gitLog}"\nif [ "$1" = "branch" ]; then echo feature; fi\n`, "utf8");
     await chmod(gitMock, 0o755);
     const env = tempEnv({ GITCODE_API_BASE: base, GITCODE_TOKEN: "secret", GITCODE_GIT_BIN: gitMock });
+
+    const missingReviewBody = await run(["pr", "review", "3", "-R", "gcw_CSGJYRfL/test"], { env, cwd });
+    assert.equal(missingReviewBody.code, 1);
+    assert.match(missingReviewBody.stderr, /gc pr review requires --body or --body-file/);
+    assert.equal(requests.length, 0);
 
     const list = await run(["pr", "list", "-R", "gcw_CSGJYRfL/test", "--json", "number,title", "--jq", ".[0].title"], { env, cwd });
     assert.equal(JSON.parse(list.stdout), "pr");

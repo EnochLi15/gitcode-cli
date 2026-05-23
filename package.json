@@ -1,6 +1,6 @@
 {
   "name": "@plm-cac/gitcode-cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Agent-ready GitCode CLI with gh-like repository, issue, pull request, auth, and JSON workflows",
   "type": "module",
   "bin": {
@@ -19,7 +19,8 @@
   },
   "files": [
     "dist",
-    "docs",
+    "docs/*.md",
+    "docs/assets/readme-hero.png",
     "skills",
     "agent-harness/WEB2CLI.md"
   ],

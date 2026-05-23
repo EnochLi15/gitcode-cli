@@ -5,6 +5,16 @@ should move completed bullets under a version heading with the release date.
 
 ## Unreleased
 
+## 1.0.1
+
+- Added `gc pr review --help` documentation for review-specific body and
+  state flags.
+- Made `gc pr review` fail locally with an actionable message when neither
+  `--body` nor `--body-file` is supplied, instead of sending an empty body to
+  the GitCode API.
+
+## 1.0.0
+
 - Clarified the project positioning as an automation-first, agent-ready GitCode
   CLI with `gh`-like workflows where GitCode has equivalent concepts.
 - Added validated interactive `gc auth login` while preserving

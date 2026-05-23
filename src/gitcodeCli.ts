@@ -42,7 +42,7 @@ export async function runGitCodeCli(argv: string[]): Promise<void> {
   let command = args.shift();
   if (!command || command === "help" || ctx.web && command === "--help") return help();
   if (command === "--help" || command === "-h") return help();
-  if (command === "--version") return console.log("1.0.0");
+  if (command === "--version") return console.log("1.0.1");
   if (args.includes("--help") || args.includes("-h")) return help(command, args[0]);
 
   if (!commandNames.has(command)) {
@@ -321,8 +321,9 @@ async function prCommand(ctx: GitCodeContext, args: string[]): Promise<void> {
   if (sub === "comment" || sub === "review") {
     const repo = await resolveRepo(ctx);
     const number = objectNumber(needArg(args.shift(), `Usage: gc pr ${sub} NUMBER --body TEXT`));
-    const body = takeOption(args, "--body", "-b") ?? await bodyFromFile(args) ?? "";
+    const body = takeOption(args, "--body", "-b") ?? await bodyFromFile(args);
     if (!body && sub === "comment") throw new CliError(`Usage: gc pr ${sub} NUMBER --body TEXT`);
+    if (!body && sub === "review") throw new CliError("gc pr review requires --body or --body-file. Use gc pr comment for discussion-only comments.");
     const endpoint = sub === "comment" ? "comments" : "reviews";
     const event = takeFlag(args, "--approve") ? "APPROVE" : takeFlag(args, "--request-changes") ? "REQUEST_CHANGES" : "COMMENT";
     const data = await prDiscussionRequest(repo, number, endpoint, sub === "review" ? { body, event } : { body }, event);
@@ -735,7 +736,7 @@ async function apiRequest(path: string, options: RequestOptions): Promise<unknow
   const method = options.method ?? "GET";
   const headers: Record<string, string> = {
     "accept": "application/json",
-    "user-agent": "gitcode-cli/1.0.0"
+    "user-agent": "gitcode-cli/1.0.1"
   };
   if (auth.token) Object.assign(headers, authHeaders(auth.token));
   if (options.body !== undefined) headers["content-type"] = "application/json";
@@ -1230,7 +1231,7 @@ async function validateToken(host: string, token: string): Promise<void> {
   const url = new URL("user", base.endsWith("/") ? base : `${base}/`);
   const headers = authHeaders(token);
   headers.accept = "application/json";
-  headers["user-agent"] = "gitcode-cli/1.0.0";
+  headers["user-agent"] = "gitcode-cli/1.0.1";
   const response = await fetch(url, { method: "GET", headers });
   if (response.ok) return;
   const text = await response.text();
@@ -1472,6 +1473,7 @@ function help(command?: string, subcommand?: string): void {
     repo: "Usage: gc repo <list|view|clone|set-default|create|fork|sync>\n\nExamples:\n  gc repo view -R gcw_CSGJYRfL/test --json name,defaultBranchRef\n  gc repo clone gcw_CSGJYRfL/test -- --depth 1",
     issue: "Usage: gc issue <list|view|create|edit|close|reopen|comment>\n\nExamples:\n  gc issue list -R OWNER/REPO --state open --json number,title --jq '.[0].title'\n  gc issue create --title 'Bug' --body-file issue.md",
     pr: "Usage: gc pr <list|view|create|checkout|diff|status|comment|review|merge|close|reopen>\n\nExamples:\n  gc pr list --state open --base main\n  gc pr merge 12 --squash --delete-branch --yes",
+    "pr review": "Usage: gc pr review NUMBER [--body TEXT | --body-file FILE] [--approve | --request-changes | --comment] [-R OWNER/REPO]\n\nCreate a pull request review. A review body is required; use `gc pr comment` for discussion-only comments.\n\nFlags:\n  --body, -b TEXT        Review body text\n  --body-file, -F FILE   Read review body from FILE, or '-' for stdin\n  --approve             Approve the pull request\n  --request-changes     Request changes on the pull request\n  --comment             Leave a non-blocking review comment\n\nExamples:\n  gc pr review 12 --approve --body 'Looks good'\n  gc pr review 12 --request-changes --body-file review.md\n  gc pr comment 12 --body 'Discussion note'",
     file: "Usage: gc file <list|view>\n\nExamples:\n  gc file list -R OWNER/REPO src --json path,type\n  gc file view -R OWNER/REPO README.md --ref main",
     org: "Usage: gc org <list|view|repos|members>\n\nExamples:\n  gc org list --json login,name\n  gc org repos my-org --json fullName",
     "ssh-key": "Usage: gc ssh-key <list|add|delete>\n\nExamples:\n  gc ssh-key list --json id,title\n  gc ssh-key add --title laptop --key-file ~/.ssh/id_ed25519.pub\n  gc ssh-key delete 2 --yes",

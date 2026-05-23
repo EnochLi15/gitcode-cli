@@ -246,6 +246,13 @@ export const ghContractCases = [
     expect: { code: 0, stdoutIncludes: "Reopened pull request #8", stderr: "" }
   },
   {
+    name: "pr review requires a body before calling the API",
+    argv: ["pr", "review", "8", "-R", repo],
+    env: { GITCODE_TOKEN: "contract-token" },
+    requests: [],
+    expect: { code: 1, stderrIncludes: "gc pr review requires --body or --body-file. Use gc pr comment for discussion-only comments." }
+  },
+  {
     name: "pr merge requires --yes and can delete the source branch",
     argv: ["pr", "merge", "8", "-R", repo, "--squash", "--delete-branch", "--yes"],
     env: { GITCODE_TOKEN: "contract-token" },
